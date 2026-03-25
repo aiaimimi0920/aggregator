@@ -1,8 +1,5 @@
-name: Process
+name: Legacy Process (Disabled)
 on:
-  schedule:
-    - cron: "05 03 * * *"
-    - cron: "05 11 * * *"
   workflow_dispatch:
 
 env:
@@ -31,27 +28,12 @@ env:
   ENABLE_SPECIAL_PROTOCOLS: ${{ vars.ENABLE_SPECIAL_PROTOCOLS }}
 
 jobs:
-  process:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Prepare
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-          architecture: "x64"
-          cache: "pip"
-
-      - name: Install
-        run: pip3 install -r requirements.txt
-
-      - name: Process
-        run: python -u subscribe/process.py --overwrite
-
-      - name: Timestamp
-        run: date
+      - name: Retired
+        run: |
+          echo "Legacy process workflow is disabled in this fork."
+          echo "Use 'Process R2' for the active GitHub Actions batch runtime."
