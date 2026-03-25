@@ -713,7 +713,8 @@ class AirPort:
         ignore: bool = False,
         special: bool = False,
         throw: bool = False,
-        use_subconverter: bool = True,
+        # If the subscription is already Clash YAML, direct parsing is more stable.
+        use_subconverter: bool = False,
     ) -> list:
         def clean_text(document: str) -> str:
             document = utils.trim(text=document)

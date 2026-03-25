@@ -547,25 +547,27 @@ def verify(item: dict, mihomo: bool = True) -> bool:
                     if flow and flow != "xtls-rprx-vision":
                         return False
                 if "ws-opts" in item:
-                    if network != "ws":
-                        return False
-
-                    ws_opts = item.get("ws-opts", {})
-                    if not ws_opts or type(ws_opts) != dict:
-                        return False
-                    if "path" in ws_opts and type(ws_opts["path"]) != str:
-                        return False
-                    if "headers" in ws_opts and type(ws_opts["headers"]) != dict:
-                        return False
+                    if network == "ws":
+                        ws_opts = item.get("ws-opts", {})
+                        if not ws_opts or type(ws_opts) != dict:
+                            return False
+                        if "path" in ws_opts and type(ws_opts["path"]) != str:
+                            return False
+                        if "headers" in ws_opts and type(ws_opts["headers"]) != dict:
+                            return False
+                    else:
+                        item.pop("ws-opts", None)
+                        item.pop("ws-path", None)
+                        item.pop("ws-headers", None)
                 if "grpc-opts" in item:
-                    if network != "grpc":
-                        return False
-
-                    grpc_opts = item.get("grpc-opts", {})
-                    if not grpc_opts or type(grpc_opts) != dict:
-                        return False
-                    if "grpc-service-name" not in grpc_opts or type(grpc_opts["grpc-service-name"]) != str:
-                        return False
+                    if network == "grpc":
+                        grpc_opts = item.get("grpc-opts", {})
+                        if not grpc_opts or type(grpc_opts) != dict:
+                            return False
+                        if "grpc-service-name" not in grpc_opts or type(grpc_opts["grpc-service-name"]) != str:
+                            return False
+                    else:
+                        item.pop("grpc-opts", None)
                 if "reality-opts" in item:
                     reality_opts = item.get("reality-opts", {})
                     if (
@@ -589,17 +591,18 @@ def verify(item: dict, mihomo: bool = True) -> bool:
                             short_id = str(short_id)
                         else:
                             return False
-                    # if len(short_id) != 8 or not is_hex(short_id) or re.match(r"\d+e\d+", short_id, flags=re.I):
-                    #     return False
 
-                    try:
-                        sib = bytes.fromhex(short_id)
-                        if len(sib) > 8:
+                    short_id = utils.trim(short_id)
+                    if short_id:
+                        try:
+                            sib = bytes.fromhex(short_id)
+                            if len(sib) > 8:
+                                return False
+                        except ValueError:
                             return False
-                    except ValueError:
-                        return False
-
-                    reality_opts["short-id"] = QuotedStr(short_id)
+                        reality_opts["short-id"] = QuotedStr(short_id)
+                    else:
+                        reality_opts["short-id"] = ""
             elif item["type"] == "tuic":
                 # mihomo: https://wiki.metacubex.one/config/proxies/tuic
                 token = wrap(item.get("token", ""))

@@ -3,7 +3,9 @@
 # @Author  : wzdnzd
 # @Time    : 2022-07-15
 
+import io
 import json
+import mimetypes
 import os
 import traceback
 import urllib
@@ -542,7 +544,165 @@ class PushToQBin(PushToPastefy):
         return url
 
 
-SUPPORTED_ENGINES = set(["gist", "imperial", "pastefy", "pastegg", "qbin"] + [LOCAL_STORAGE])
+class PushToR2(PushTo):
+    def __init__(
+        self,
+        access_key_id: str,
+        secret_access_key: str,
+        endpoint: str,
+        public_base: str = "",
+        account_id: str = "",
+        region: str = "auto",
+    ) -> None:
+        super().__init__(token="")
+        self.name = "r2"
+        self.access_key_id = utils.trim(access_key_id)
+        self.secret_access_key = utils.trim(secret_access_key)
+        self.endpoint = utils.trim(endpoint)
+        self.public_base = utils.trim(public_base)
+        self.account_id = utils.trim(account_id)
+        self.region = utils.trim(region) or "auto"
+        self._client = None
+        self.worker_base = utils.trim(os.environ.get("WORKER_BASE", "")).removesuffix("/")
+        self.trigger_token = utils.trim(os.environ.get("TRIGGER_TOKEN", ""))
+
+    def _client_instance(self):
+        if self._client is not None:
+            return self._client
+
+        try:
+            import boto3
+            from botocore.config import Config
+
+            config = Config(signature_version="s3v4")
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=self.endpoint,
+                region_name=self.region,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.secret_access_key,
+                config=config,
+            )
+            return self._client
+        except Exception:
+            logger.error(f"[PushError] failed to initialize r2 client: \n{traceback.format_exc()}")
+            return None
+
+    def _bucket_key(self, config: dict) -> tuple[str, str]:
+        bucket = utils.trim(os.environ.get("R2_BUCKET", "") or config.get("bucket", ""))
+        key = utils.trim(config.get("key", ""))
+        if not key:
+            folder = utils.trim(config.get("folderid", ""))
+            filename = utils.trim(config.get("fileid", "")) or utils.trim(config.get("filename", ""))
+            if filename:
+                key = f"{folder}/{filename}".removeprefix("/") if folder else filename
+        return bucket, key
+
+    def _guess_content_type(self, key: str, default: str = "text/plain; charset=utf-8") -> str:
+        content_type, _ = mimetypes.guess_type(key)
+        return content_type or default
+
+    def validate(self, config: dict) -> bool:
+        if not isinstance(config, dict):
+            return False
+
+        bucket, key = self._bucket_key(config)
+        if not bucket or not key:
+            return False
+
+        if not self.access_key_id or not self.secret_access_key:
+            return False
+
+        return bool(self.endpoint)
+
+    def push_to(self, content: str, config: dict, group: str = "", retry: int = 5, **kwargs) -> bool:
+        if not self.validate(config=config):
+            logger.error(f"[PushError] push config is invalidate, domain: {self.name}")
+            return False
+
+        bucket, key = self._bucket_key(config)
+        if not bucket or not key:
+            logger.error(f"[PushError] missing bucket or key for r2 storage, group=[{group}]")
+            return False
+
+        try:
+            content_type = utils.trim(config.get("content_type", "")) or self._guess_content_type(key)
+            cache_control = utils.trim(config.get("cache_control", ""))
+
+            if self.worker_base and self.trigger_token:
+                url = f"{self.worker_base}/__internal/r2-put?key={urllib.parse.quote(key)}"
+                headers = {
+                    "x-trigger-token": self.trigger_token,
+                    "Content-Type": content_type,
+                    "Accept": "application/json, text/plain, */*",
+                    "User-Agent": utils.USER_AGENT,
+                }
+                if cache_control:
+                    headers["x-r2-cache-control"] = cache_control
+
+                request = urllib.request.Request(
+                    url=url,
+                    data=content.encode("utf-8"),
+                    headers=headers,
+                    method="PUT",
+                )
+                response = urllib.request.urlopen(request, timeout=120, context=utils.CTX)
+                if response.getcode() in [200, 201]:
+                    logger.info(f"[PushSuccess] push subscribes information to worker-r2 successed, group=[{group}]")
+                    return True
+                raise RuntimeError(f"unexpected status code: {response.getcode()}")
+
+            client = self._client_instance()
+            if client is None:
+                return False
+
+            extra_args = {"ContentType": content_type} if content_type else {}
+            if cache_control:
+                extra_args["CacheControl"] = cache_control
+
+            payload = io.BytesIO(content.encode("utf-8"))
+            client.upload_fileobj(payload, bucket, key, ExtraArgs=extra_args or None)
+            logger.info(f"[PushSuccess] push subscribes information to {self.name} successed, group=[{group}]")
+            return True
+        except Exception:
+            logger.error(f"[PushError]: group=[{group}], name: {self.name}, error message: \n{traceback.format_exc()}")
+            retry -= 1
+            if retry > 0:
+                return self.push_to(content, config, group, retry, **kwargs)
+            return False
+
+    def filter_push(self, config: dict) -> dict:
+        if not self.access_key_id or not self.secret_access_key or not self.endpoint:
+            return {}
+
+        records = {}
+        for k, v in config.items():
+            if not isinstance(v, dict):
+                continue
+            bucket, key = self._bucket_key(v)
+            if bucket and key:
+                records[k] = v
+        return records
+
+    def raw_url(self, config: dict) -> str:
+        if not isinstance(config, dict):
+            return ""
+
+        bucket, key = self._bucket_key(config)
+        if not bucket or not key:
+            return ""
+
+        base = utils.trim(config.get("public_base", "")) or self.public_base
+        if not base:
+            return ""
+
+        if "{account_id}" in base or "{bucket}" in base or "{key}" in base:
+            return base.format(account_id=self.account_id, bucket=bucket, key=key)
+
+        return f"{base.removesuffix('/')}/{key}"
+
+
+SUPPORTED_ENGINES = set(["gist", "imperial", "pastefy", "pastegg", "qbin", "r2"] + [LOCAL_STORAGE])
 
 
 @dataclass
@@ -559,6 +719,15 @@ class PushConfig(object):
     # storage domain address
     domain: str = ""
 
+    # r2 access key id
+    access_key_id: str = ""
+
+    # r2 secret access key
+    secret_access_key: str = ""
+
+    # r2 account id
+    account_id: str = ""
+
     @classmethod
     def from_dict(cls, data: dict) -> "PushConfig":
         if not data or type(data) != dict:
@@ -570,9 +739,20 @@ class PushConfig(object):
 
         token = utils.trim(data.get("token", ""))
         base = utils.trim(data.get("base", ""))
-        domain = utils.trim(data.get("domain", ""))
+        domain = utils.trim(data.get("domain", "")) or utils.trim(data.get("public_base", ""))
+        access_key_id = utils.trim(data.get("access_key_id", "")) or utils.trim(data.get("access_key", ""))
+        secret_access_key = utils.trim(data.get("secret_access_key", "")) or utils.trim(data.get("secret_key", ""))
+        account_id = utils.trim(data.get("account_id", ""))
 
-        return cls(engine=engine, token=token, base=base, domain=domain)
+        return cls(
+            engine=engine,
+            token=token,
+            base=base,
+            domain=domain,
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            account_id=account_id,
+        )
 
 
 def get_instance(config: PushConfig) -> PushTo:
@@ -582,6 +762,29 @@ def get_instance(config: PushConfig) -> PushTo:
     engine = utils.trim(config.engine)
     if not engine:
         raise ValueError(f"[PushError] unknown storge type: {engine}")
+
+    if engine == "r2":
+        access_key_id = utils.trim(
+            config.access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "") or os.environ.get("AWS_ACCESS_KEY_ID", "")
+        )
+        secret_access_key = utils.trim(
+            config.secret_access_key
+            or os.environ.get("R2_SECRET_ACCESS_KEY", "")
+            or os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+        )
+        account_id = utils.trim(config.account_id or os.environ.get("R2_ACCOUNT_ID", ""))
+        endpoint = utils.trim(config.base or os.environ.get("R2_ENDPOINT", ""))
+        if not endpoint and account_id:
+            endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+
+        public_base = utils.trim(config.domain or os.environ.get("R2_PUBLIC_BASE", ""))
+        return PushToR2(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            endpoint=endpoint,
+            public_base=public_base,
+            account_id=account_id,
+        )
 
     token = utils.trim(config.token or os.environ.get("PUSH_TOKEN", ""))
     if engine != LOCAL_STORAGE and not token:

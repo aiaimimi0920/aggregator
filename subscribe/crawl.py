@@ -693,10 +693,18 @@ def search_github_issues(page: int, cookie: str) -> list[str]:
         return []
 
 
-def search_github_issues_byapi(peer_page: int = 50, page: int = 1) -> list[str]:
+def search_github_issues_byapi(token: str, peer_page: int = 50, page: int = 1) -> list[str]:
+    if utils.isblank(token):
+        return []
+
     peer_page, page = min(max(peer_page, 1), 100), max(1, page)
     url = f"https://api.github.com/search/issues?q=%22%2Fapi%2Fv1%2Fclient%2Fsubscribe%3Ftoken%3D%22&sort=created&order=desc&per_page={peer_page}&page={page}"
-    content = utils.http_get(url=url)
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        # "X-GitHub-Api-Version": "2022-11-28"
+    }
+    content = utils.http_get(url=url, headers=headers)
     if utils.isblank(content):
         return []
     try:
@@ -814,7 +822,7 @@ def crawl_github(limits: int = 3, push_to: list = [], spams: list = [], exclude:
         items = list(set(itertools.chain.from_iterable(results)))
 
         links.extend(items)
-        links.extend(search_github_issues_byapi(peer_page=5, page=1))
+        links.extend(search_github_issues_byapi(token=token, peer_page=5, page=1))
 
     if links:
         page_tasks = {}
