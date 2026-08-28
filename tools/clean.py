@@ -31,7 +31,7 @@ CTX.verify_mode = ssl.CERT_NONE
 
 
 def trim(text: str) -> str:
-    if not text or type(text) != str:
+    if not text or not isinstance(text, str):
         return ""
 
     return text.strip()
@@ -89,12 +89,13 @@ def download_mmdb(repo: str, target: str, filepath: str, retry: int = 3):
         raise Exception("no download url found in github release")
 
     download(download_url, filepath, target, retry)
+    return True
 
 
 def download(url: str, filepath: str, filename: str, retry: int = 3) -> None:
     """Download file from url to filepath with filename"""
 
-    if retry < 0:
+    if retry <= 0:
         raise Exception("archieved max retry count for download")
 
     url = trim(url)
@@ -116,13 +117,19 @@ def download(url: str, filepath: str, filename: str, retry: int = 3) -> None:
     if os.path.exists(fullpath) and os.path.isfile(fullpath):
         os.remove(fullpath)
 
-    # download target file from github release to fullpath
-    try:
-        urllib.request.urlretrieve(url=url, filename=fullpath)
-    except Exception:
-        return download(url, filepath, filename, retry - 1)
+    last_error = None
+    for attempt in range(retry):
+        try:
+            # download target file from github release to fullpath
+            urllib.request.urlretrieve(url=url, filename=fullpath)
+            print(f"download file {filename} to {fullpath} success")
+            return
+        except Exception as error:
+            last_error = error
+            if attempt >= retry - 1:
+                break
 
-    print(f"download file {filename} to {fullpath} success")
+    raise Exception(f"failed to download {filename} from {url}: {last_error}")
 
 
 def load_mmdb(
@@ -130,8 +137,7 @@ def load_mmdb(
 ) -> database.Reader:
     filepath = os.path.join(directory, filename)
     if update or not os.path.exists(filepath) or not os.path.isfile(filepath):
-        if not download_mmdb(repo, filename, directory):
-            return None
+        download_mmdb(repo, filename, directory)
 
     return database.Reader(filepath)
 
@@ -146,14 +152,14 @@ def read_response(response: HTTPResponse, expected: int = 200, deserialize: bool
 
     try:
         text = response.read()
-    except:
+    except Exception:
         text = b""
 
     try:
         content = text.decode(encoding="UTF8")
     except UnicodeDecodeError:
         content = gzip.decompress(text).decode("UTF8")
-    except:
+    except Exception:
         content = ""
 
     if not deserialize:
@@ -164,7 +170,7 @@ def read_response(response: HTTPResponse, expected: int = 200, deserialize: bool
     try:
         data = json.loads(content)
         return data if not key else data.get(key, None)
-    except:
+    except Exception:
         return None
 
 
@@ -182,7 +188,7 @@ def main(args: argparse.Namespace) -> None:
             f.seek(0, 0)
             yaml.add_multi_constructor("str", lambda loader, suffix, node: str(node.value), Loader=yaml.SafeLoader)
             nodes = yaml.load(f, Loader=yaml.SafeLoader).get("proxies", [])
-        except:
+        except Exception:
             nodes = []
 
         if nodes and args.location:

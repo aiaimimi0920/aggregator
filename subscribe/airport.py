@@ -243,7 +243,8 @@ class AirPort:
                 api_prefix=api_prefix,
             )
 
-        except:
+        except Exception:
+            logger.debug(f"[QueryError] failed to parse register require, domain: {domain}")
             return RegisterRequire(verify=default, invite=default, recaptcha=default)
 
     def sen_email_verify(self, email: str, retry: int = 3) -> bool:
@@ -259,15 +260,19 @@ class AirPort:
             headers["Content-Type"] = "application/json"
             data = json.dumps(params).encode(encoding="UTF8")
 
-        try:
-            request = urllib.request.Request(self.send_email, data=data, headers=headers, method="POST")
-            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
-            if not response or response.getcode() != 200:
-                return False
+        for attempt in range(retry):
+            try:
+                request = urllib.request.Request(self.send_email, data=data, headers=headers, method="POST")
+                response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+                if not response or response.getcode() != 200:
+                    return False
 
-            return json.loads(response.read()).get("data", False)
-        except:
-            return self.sen_email_verify(email=email, retry=retry - 1)
+                return json.loads(response.read()).get("data", False)
+            except Exception:
+                if attempt >= retry - 1:
+                    break
+
+        return False
 
     def register(
         self, email: str, password: str, email_code: str = None, invite_code: str = None, retry: int = 3
@@ -294,49 +299,52 @@ class AirPort:
             headers["Content-Type"] = "application/json"
             data = json.dumps(params).encode(encoding="UTF8")
 
-        try:
-            request = urllib.request.Request(self.reg, data=data, headers=headers, method="POST")
-            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
-            code = 400 if not response else response.getcode()
-            if code != 200:
-                logger.error(f"[RegisterError] request error when register, domain: {self.ref}, code={code}")
-                return "", ""
+        for attempt in range(retry):
+            try:
+                request = urllib.request.Request(self.reg, data=data, headers=headers, method="POST")
+                response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+                code = 400 if not response else response.getcode()
+                if code != 200:
+                    logger.error(f"[RegisterError] request error when register, domain: {self.ref}, code={code}")
+                    return "", ""
 
-            self.username = email
-            self.password = password
+                self.username = email
+                self.password = password
 
-            cookies = utils.extract_cookie(response.getheader("Set-Cookie"))
-            data = json.loads(response.read()).get("data", {})
-            token, authorization = "", ""
-            if isinstance(data, dict):
-                token = data.get("token", "")
-                authorization = data.get("auth_data", "")
+                cookies = utils.extract_cookie(response.getheader("Set-Cookie"))
+                data = json.loads(response.read()).get("data", {})
+                token, authorization = "", ""
+                if isinstance(data, dict):
+                    token = data.get("token", "")
+                    authorization = data.get("auth_data", "")
 
-            # 先判断是否存在免费套餐，如果存在则购买
-            self.order_plan(
-                email=email,
-                password=password,
-                cookies=cookies,
-                authorization=authorization,
-            )
+                self.order_plan(
+                    email=email,
+                    password=password,
+                    cookies=cookies,
+                    authorization=authorization,
+                )
 
-            subscribe_info = renewal.get_subscribe_info(
-                domain=self.ref,
-                cookies=cookies,
-                authorization=authorization,
-                api_prefix=self.api_prefix,
-            )
-            if subscribe_info:
-                self.sub = subscribe_info.sub_url
-            if not self.sub:
-                if token:
-                    self.sub = f"{self.ref}/api/v1/client/subscribe?token={token}"
-                else:
-                    logger.error(f"[RegisterError] cannot get token when register, domain: {self.ref}")
+                subscribe_info = renewal.get_subscribe_info(
+                    domain=self.ref,
+                    cookies=cookies,
+                    authorization=authorization,
+                    api_prefix=self.api_prefix,
+                )
+                if subscribe_info:
+                    self.sub = subscribe_info.sub_url
+                if not self.sub:
+                    if token:
+                        self.sub = f"{self.ref}/api/v1/client/subscribe?token={token}"
+                    else:
+                        logger.error(f"[RegisterError] cannot get token when register, domain: {self.ref}")
 
-            return cookies, authorization
-        except:
-            return self.register(email, password, email_code, invite_code, retry - 1)
+                return cookies, authorization
+            except Exception:
+                if attempt >= retry - 1:
+                    break
+
+        return "", ""
 
     def order_plan(
         self,
@@ -416,7 +424,7 @@ class AirPort:
                     proxies.append(item.get("name"))
 
             return proxies
-        except:
+        except Exception:
             return []
 
     def get_subscribe(
@@ -504,7 +512,8 @@ class AirPort:
                     invite_code=invite_code,
                     retry=retry,
                 )
-            except:
+            except Exception:
+                logger.exception(f"[RegisterError] mailbox workflow failed, domain: {self.ref}")
                 return "", ""
 
     def parse(
@@ -553,7 +562,7 @@ class AirPort:
             logger.error(f"[ParseError] cannot found any proxies, subscribe: {utils.mask(url=self.sub)}")
             return []
 
-        chatgpt = chatgpt if chatgpt and type(chatgpt) == dict else None
+        chatgpt = chatgpt if isinstance(chatgpt, dict) and chatgpt else None
         enable, operate, pattern = False, "IN", ""
         if chatgpt:
             enable = chatgpt.get("enable", False)
@@ -596,7 +605,7 @@ class AirPort:
                     else:
                         if self.exclude and re.search(self.exclude, name, re.I):
                             continue
-                except:
+                except Exception:
                     logger.error(
                         f"filter proxies error, maybe include or exclude regex exists problems, include: {self.include}\texclude: {self.exclude}"
                     )
@@ -640,7 +649,7 @@ class AirPort:
                     # 重命名带网址的节点
                     regex = r"(?:https?://)?(?:[a-zA-Z0-9\u4e00-\u9fa5\-]+\.)+[a-zA-Z\u4e00-\u9fa5]{2,}"
                     name = re.sub(regex, "", name, flags=re.I)
-                except:
+                except Exception:
                     logger.error(
                         f"rename error, name: {name},\trename: {self.rename}\tseparator: {RENAME_SEPARATOR}\tchatgpt: {pattern}\tdomain: {self.ref}"
                     )
@@ -691,10 +700,8 @@ class AirPort:
                 proxies.append(item)
 
             return proxies
-        except:
-            logger.error(
-                f"[ParseError] occur error when parse data, domain: {self.ref}, message:\n{traceback.format_exc()}"
-            )
+        except Exception:
+            logger.exception(f"[ParseError] occur error when parse data, domain: {self.ref}")
             return []
 
     @staticmethod
@@ -764,12 +771,11 @@ class AirPort:
                 with open(v2ray_file, "w+", encoding="UTF8") as f:
                     f.write(text)
                     f.flush()
-            except:
+            except Exception:
                 if os.path.exists(v2ray_file):
                     os.remove(v2ray_file)
 
-                logger.error(f"save file fialed, artifact: {artifact}")
-                traceback.print_exc()
+                logger.exception(f"save file fialed, artifact: {artifact}")
 
             generate_conf = os.path.join(PATH, "subconverter", "generate.ini")
             success = subconverter.generate_conf(

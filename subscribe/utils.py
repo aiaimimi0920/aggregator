@@ -53,6 +53,24 @@ DEFAULT_HTTP_HEADERS = {
 }
 
 
+def is_huggingface_space_booting(content: str, status_code: int, content_type: str = "") -> bool:
+    if not content:
+        return False
+
+    content_type = trim(content_type).lower()
+    if "text/html" not in content_type and status_code == 200:
+        return False
+
+    lowered = content.lower()
+    markers = [
+        "preparing space",
+        "hugging face – the ai community building the future",
+        "hugging face - the ai community building the future",
+        "spinner-wrapper",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
 def random_chars(length: int, punctuation: bool = False) -> str:
     length = max(length, 1)
     if punctuation:
@@ -87,78 +105,101 @@ def http_get(
     interval = max(0, interval)
     timeout = max(1, timeout)
     length = None if max_size is None or max_size <= 0 else max_size
+    if "hf.space" in url:
+        retry = max(retry, 6)
+        interval = max(interval, 10)
 
-    try:
-        url = encoding_url(url=url)
-        if params and isinstance(params, dict):
-            data = urllib.parse.urlencode(params)
-            if "?" in url:
-                url += f"&{data}"
-            else:
-                url += f"?{data}"
-
-        request = urllib.request.Request(url=url, headers=headers)
-        if proxy and (proxy.startswith("https://") or proxy.startswith("http://")):
-            host, protocal = "", ""
-            if proxy.startswith("https://"):
-                host, protocal = proxy[8:], "https"
-            else:
-                host, protocal = proxy[7:], "http"
-            request.set_proxy(host=host, type=protocal)
-
-        response = urllib.request.urlopen(request, timeout=timeout, context=CTX)
-        content = response.read(length)
-        status_code = response.getcode()
-        try:
-            content = str(content, encoding="utf8")
-        except:
-            content = gzip.decompress(content).decode("utf8")
-        if status_code != 200:
-            if trace:
-                logger.error(f"request failed, url: {hide(url)}, code: {status_code}, message: {content}")
-
-            return ""
-
-        return content
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, (socket.timeout, ssl.SSLError)):
-            time.sleep(interval)
-            return http_get(
-                url=url,
-                headers=headers,
-                params=params,
-                retry=retry - 1,
-                proxy=proxy,
-                interval=interval,
-                timeout=timeout,
-                max_size=length,
-            )
+    url = encoding_url(url=url)
+    if params and isinstance(params, dict):
+        data = urllib.parse.urlencode(params)
+        if "?" in url:
+            url += f"&{data}"
         else:
-            return ""
-    except Exception as e:
-        if trace:
-            logger.error(f"request failed, url: {hide(url)}, message: \n{traceback.format_exc()}")
+            url += f"?{data}"
 
-        if isinstance(e, urllib.error.HTTPError):
+    def _decode_body(response_body: bytes, response_headers) -> str:
+        if response_body is None:
+            return ""
+
+        encoding = ""
+        try:
+            encoding = trim(response_headers.get("Content-Encoding", "")).lower()
+        except Exception:
+            encoding = ""
+
+        if "gzip" in encoding:
             try:
-                message = str(e.read(), encoding="utf8")
-            except:
+                return gzip.decompress(response_body).decode("utf8")
+            except Exception:
+                pass
+
+        try:
+            return response_body.decode("utf8")
+        except Exception:
+            try:
+                return gzip.decompress(response_body).decode("utf8")
+            except Exception:
+                return response_body.decode("utf8", errors="replace")
+
+    last_error = None
+    for attempt in range(retry):
+        try:
+            request = urllib.request.Request(url=url, headers=headers)
+            if proxy and (proxy.startswith("https://") or proxy.startswith("http://")):
+                host, protocal = "", ""
+                if proxy.startswith("https://"):
+                    host, protocal = proxy[8:], "https"
+                else:
+                    host, protocal = proxy[7:], "http"
+                request.set_proxy(host=host, type=protocal)
+
+            response = urllib.request.urlopen(request, timeout=timeout, context=CTX)
+            status_code = response.getcode()
+            content_type = ""
+            try:
+                content_type = response.headers.get("Content-Type", "")
+            except Exception:
+                content_type = ""
+            content = _decode_body(response.read(length), response.headers)
+            if is_huggingface_space_booting(content=content, status_code=status_code, content_type=content_type):
+                last_error = RuntimeError("huggingface space is still preparing")
+                if attempt < retry - 1:
+                    time.sleep(max(interval, 10))
+                    continue
+                return ""
+            if status_code != 200:
+                if trace:
+                    logger.error(f"request failed, url: {hide(url)}, code: {status_code}, message: {content}")
+                return ""
+
+            return content
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if trace:
+                logger.error(f"request failed, url: {hide(url)}, code: {getattr(e, 'code', '')}, message: \n{traceback.format_exc()}")
+
+            try:
+                message = _decode_body(e.read(), e.headers)
+            except Exception:
                 message = "unknown error"
 
             if e.code != 503 or "token" in message:
                 return ""
+        except urllib.error.URLError as e:
+            last_error = e
+            if not isinstance(e.reason, (socket.timeout, ssl.SSLError)):
+                return ""
+        except Exception as e:
+            last_error = e
+            if trace:
+                logger.error(f"request failed, url: {hide(url)}, message: \n{traceback.format_exc()}")
 
-        time.sleep(interval)
-        return http_get(
-            url=url,
-            headers=headers,
-            params=params,
-            retry=retry - 1,
-            proxy=proxy,
-            interval=interval,
-            timeout=timeout,
-            max_size=length,
-        )
+        if attempt < retry - 1:
+            time.sleep(interval)
+
+    if trace and last_error is not None:
+        logger.error(f"request failed after retries, url: {hide(url)}, message: {last_error}")
+    return ""
 
 
 def extract_domain(url: str, include_protocal: bool = False) -> str:
@@ -194,20 +235,25 @@ def cmd(command: list, output: bool = False) -> tuple[bool, str]:
     if command is None or len(command) == 0:
         return False, ""
 
-    p = (
-        subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if output
-        else subprocess.Popen(command)
-    )
-    p.wait()
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE if output else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if output else subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as e:
+        logger.error(f"failed to execute command: {command}, message: {e}")
+        return False, ""
 
-    success, content = p.returncode == 0, ""
+    content = ""
     if output:
         try:
-            content = p.stdout.read().decode("utf8")
-        except:
+            content = (completed.stdout or b"").decode("utf8", errors="replace")
+        except Exception:
             content = ""
-    return success, content
+
+    return completed.returncode == 0, content
 
 
 def chmod(binfile: str) -> None:
@@ -304,7 +350,7 @@ def write_file(filename: str, lines: list) -> bool:
             f.flush()
 
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -325,11 +371,11 @@ def isb64encode(content: str, padding: bool = True) -> bool:
 
 
 def isblank(text: str) -> bool:
-    return not text or type(text) != str or not text.strip()
+    return not text or not isinstance(text, str) or not text.strip()
 
 
 def trim(text: str) -> str:
-    if not text or type(text) != str:
+    if not text or not isinstance(text, str):
         return ""
 
     return text.strip()
@@ -393,7 +439,7 @@ def mask(url: str) -> str:
             if len(token) >= 6:
                 token = token[:3] + "***" + token[-3:]
             url = f"{parse_result.scheme}://{parse_result.netloc}{path}/{token}"
-    except:
+    except Exception:
         logger.error(f"invalid url: {url}")
 
     return url
@@ -414,41 +460,43 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def http_post(
     url: str,
     headers: dict = None,
-    params: dict = {},
+    params: dict = None,
     retry: int = 3,
     timeout: float = 6,
     allow_redirects: bool = True,
 ) -> HTTPResponse:
-    if params is None or type(params) != dict or retry <= 0:
+    if params is None or not isinstance(params, dict) or retry <= 0:
         return None
 
-    timeout, retry = max(timeout, 1), retry - 1
+    timeout = max(timeout, 1)
     if not headers:
         headers = {
             "User-Agent": USER_AGENT,
             "Content-Type": "application/json",
         }
-    try:
-        data = json.dumps(params).encode(encoding="UTF8")
-        request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
-        if allow_redirects:
-            return urllib.request.urlopen(request, timeout=timeout, context=CTX)
+    data = json.dumps(params).encode(encoding="UTF8")
 
-        opener = urllib.request.build_opener(NoRedirect)
-        return opener.open(request, timeout=timeout)
-    except Exception:
-        time.sleep(random.random())
-        return http_post(
-            url=url,
-            headers=headers,
-            params=params,
-            retry=retry,
-            allow_redirects=allow_redirects,
-        )
+    last_error = None
+    for attempt in range(retry):
+        try:
+            request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
+            if allow_redirects:
+                return urllib.request.urlopen(request, timeout=timeout, context=CTX)
+
+            opener = urllib.request.build_opener(NoRedirect)
+            return opener.open(request, timeout=timeout)
+        except Exception as error:
+            last_error = error
+            if attempt < retry - 1:
+                time.sleep(random.random())
+
+    if last_error is not None:
+        logger.error(f"[HttpPost] failed after retries, url: {hide(url)}, message: {last_error}")
+    return None
 
 
 def verify_uuid(text: str) -> bool:
-    if not text or type(text) != str:
+    if not text or not isinstance(text, str):
         return False
 
     try:
@@ -510,7 +558,7 @@ def load_emoji_pattern(filepath: str = "") -> dict:
 
 
 def get_emoji(text: str, patterns: dict, default: str = "") -> str:
-    if not patterns or type(patterns) != dict or not text or type(text) != str:
+    if not isinstance(patterns, dict) or not patterns or not text or not isinstance(text, str):
         return default
 
     for pattern, emoji in patterns.items():
@@ -531,33 +579,40 @@ def get_subpath(api_prefix: str, default: str = "/api/v1/") -> str:
 
 
 def multi_process_run(func: typing.Callable, tasks: list) -> list:
-    if not func or not isinstance(func, typing.Callable):
+    if not callable(func):
         logger.error(f"skip execute due to func is not callable")
         return []
 
-    if not tasks or type(tasks) != list:
+    if not isinstance(tasks, list) or not tasks:
         logger.error(f"skip execute due to tasks is empty or invalid")
         return []
 
+    funcname = getattr(func, "__name__", repr(func))
     cpu_count = multiprocessing.cpu_count()
-    num = len(tasks) if len(tasks) <= cpu_count else cpu_count
+    num = max(1, min(len(tasks), cpu_count))
 
     starttime, results = time.time(), []
+    pool = multiprocessing.Pool(num, maxtasksperchild=100)
+    try:
+        if isinstance(tasks[0], (list, tuple)):
+            results = pool.starmap(func, tasks)
+        else:
+            results = pool.map(func, tasks)
+        pool.close()
+        pool.join()
+    except KeyboardInterrupt:
+        logger.error(f"[Concurrent] multi-process execute [{funcname}] cancelled by user")
+        pool.terminate()
+        pool.join()
+        raise
+    except Exception:
+        logger.error(
+            f"[Concurrent] multi-process execute [{funcname}] failed, message: \n{traceback.format_exc()}"
+        )
+        pool.terminate()
+        pool.join()
+        return []
 
-    # TODO: handle KeyboardInterrupt and exit program immediately
-    with multiprocessing.Pool(num) as pool:
-        try:
-            if isinstance(tasks[0], (list, tuple)):
-                results = pool.starmap(func, tasks)
-            else:
-                results = pool.map(func, tasks)
-        except KeyboardInterrupt:
-            logger.error(f"the tasks has been cancelled and the program will exit now")
-
-            pool.terminate()
-            pool.join()
-
-    funcname = getattr(func, "__name__", repr(func))
     logger.info(
         f"[Concurrent] multi-process concurrent execute [{funcname}] finished, count: {len(tasks)}, cost: {time.time()-starttime:.2f}s"
     )
@@ -572,16 +627,19 @@ def multi_thread_run(
     show_progress: bool = False,
     description: str = "",
 ) -> list:
-    if not func or not tasks or not isinstance(tasks, list):
+    if not callable(func) or not isinstance(tasks, list) or not tasks:
         return []
 
     if num_threads is None or num_threads <= 0:
         num_threads = min(len(tasks), (os.cpu_count() or 1) * 2)
+    else:
+        num_threads = max(1, min(len(tasks), num_threads))
 
     funcname = getattr(func, "__name__", repr(func))
 
     results, starttime = [None] * len(tasks), time.time()
-    with futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+    executor = futures.ThreadPoolExecutor(max_workers=num_threads)
+    try:
         if isinstance(tasks[0], (list, tuple)):
             collections = {executor.submit(func, *param): i for i, param in enumerate(tasks)}
         else:
@@ -601,6 +659,14 @@ def multi_thread_run(
                 results[index] = result
             except Exception as e:
                 logger.error(f"function {funcname} execution generated an exception: {e}")
+    except KeyboardInterrupt:
+        logger.error(f"[Concurrent] multi-threaded execute [{funcname}] cancelled by user")
+        for future in getattr(locals(), "collections", {}):
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=False)
 
     logger.info(
         f"[Concurrent] multi-threaded execute [{funcname}] finished, count: {len(tasks)}, cost: {time.time()-starttime:.2f}s"

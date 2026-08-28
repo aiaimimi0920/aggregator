@@ -252,45 +252,44 @@ def parse(node: dict, uuid: str, user: dict = None, includes: str = "all") -> di
 
 
 def login(url, params, headers, retry) -> str:
-    try:
-        data = urllib.parse.urlencode(params).encode(encoding="UTF8")
-        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    for attempt in range(max(1, retry)):
+        try:
+            data = urllib.parse.urlencode(params).encode(encoding="UTF8")
+            request = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-        response = urllib.request.urlopen(request, timeout=10, context=CTX)
-        if response.getcode() == 200:
-            return response.getheader("Set-Cookie")
-        else:
-            print("[LoginError]: {}".format(response.read().decode("unicode_escape")))
+            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+            if response.getcode() == 200:
+                return response.getheader("Set-Cookie")
+
+            print("[ScanerLoginError] domain: {}, message: {}".format(url, response.read().decode("unicode_escape")))
             return ""
+        except Exception as e:
+            print("[ScanerLoginError] doamin: {}, message: {}".format(url, str(e)))
+            if attempt >= max(1, retry) - 1:
+                break
 
-    except Exception as e:
-        print("[LoginError]: {}".format(str(e)))
-
-        retry -= 1
-        return login(url, params, headers, retry) if retry > 0 else ""
-
-
+    return ""
 def register(url: str, params: dict, retry: int) -> bool:
-    try:
-        data = urllib.parse.urlencode(params).encode(encoding="UTF8")
-        request = urllib.request.Request(url, data=data, method="POST", headers=HEADER)
+    for attempt in range(max(1, retry)):
+        try:
+            data = urllib.parse.urlencode(params).encode(encoding="UTF8")
+            request = urllib.request.Request(url, data=data, method="POST", headers=HEADER)
 
-        response = urllib.request.urlopen(request, timeout=10, context=CTX)
-        if response.getcode() == 200:
-            content = response.read()
-            kv = json.loads(content)
-            if "ret" in kv and kv["ret"] == 1:
-                return True
+            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+            if response.getcode() == 200:
+                content = response.read()
+                kv = json.loads(content)
+                if "ret" in kv and kv["ret"] == 1:
+                    return True
 
-        print("[ScanerRegisterError] domain: {}, message: {}".format(url, response.read().decode("unicode_escape")))
-        return False
-    except Exception as e:
-        print("[ScanerRegisterError] domain: {}, message: {}".format(url, str(e)))
+            print("[ScanerRegisterError] domain: {}, message: {}".format(url, response.read().decode("unicode_escape")))
+            return False
+        except Exception as e:
+            print("[ScanerRegisterError] domain: {}, message: {}".format(url, str(e)))
+            if attempt >= max(1, retry) - 1:
+                break
 
-        retry -= 1
-        return register(url, params, retry) if retry > 0 else False
-
-
+    return False
 def reload(url: str, config: str) -> None:
     if not (os.path.exists(config) and os.path.isfile(config)):
         print("config file not exists, path: {}".format(config))
@@ -338,33 +337,30 @@ def fetch_nodes(domain: str, email: str, passwd: str, headers: dict = None, retr
 
     headers["cookie"] = cookie
     content = None
-    while retry > 0 and not content:
-        retry -= 1
+    for attempt in range(max(1, retry)):
         try:
             request = urllib.request.Request(domain + "/getnodelist", headers=headers)
             response = urllib.request.urlopen(request, timeout=30, context=CTX)
             if response.getcode() == 200:
                 content = response.read()
                 break
-            else:
-                print(
-                    "[ScanerFetchError] domain: {}, message: {}".format(
-                        domain, response.read().decode("unicode_escape")
-                    )
+
+            print(
+                "[ScanerFetchError] domain: {}, message: {}".format(
+                    domain, response.read().decode("unicode_escape")
                 )
+            )
         except Exception as e:
             print("[ScanerFetchError] domain: {}, message: {}".format(domain, str(e)))
 
     return content
-
-
 def check(domain: str) -> bool:
     try:
         content = http_get(url=domain + "/getnodelist", headers=HEADER)
         if content:
             data = json.loads(content)
             return "ret" in data and data["ret"] == -1
-    except:
+    except Exception:
         pass
 
     return False
@@ -472,60 +468,58 @@ def http_get(
         }
 
     interval = max(0, interval)
-    try:
-        url = encoding_url(url=url)
-        if params and isinstance(params, dict):
-            data = urllib.parse.urlencode(params)
-            if "?" in url:
-                url += f"&{data}"
-            else:
-                url += f"?{data}"
+    url = encoding_url(url=url)
+    if params and isinstance(params, dict):
+        data = urllib.parse.urlencode(params)
+        if "?" in url:
+            url += f"&{data}"
+        else:
+            url += f"?{data}"
 
-        request = urllib.request.Request(url=url, headers=headers)
-        if proxy and (proxy.startswith("https://") or proxy.startswith("http://")):
-            host, protocal = "", ""
-            if proxy.startswith("https://"):
-                host, protocal = proxy[8:], "https"
-            else:
-                host, protocal = proxy[7:], "http"
-            request.set_proxy(host=host, type=protocal)
-
-        response = urllib.request.urlopen(request, timeout=10, context=CTX)
-        content = response.read()
-        status_code = response.getcode()
-        try:
-            content = str(content, encoding="utf8")
-        except:
-            content = gzip.decompress(content).decode("utf8")
-        if status_code != 200:
+    def decode_body(body: bytes) -> str:
+        if body is None:
             return ""
 
-        return content
-    except urllib.error.HTTPError as e:
-        message = str(e.read(), encoding="utf8")
-        if e.code == 503 and "token" not in message:
-            time.sleep(interval)
-            return http_get(
-                url=url,
-                headers=headers,
-                params=params,
-                retry=retry - 1,
-                proxy=proxy,
-                interval=interval,
-            )
-        return ""
-    except urllib.error.URLError as e:
-        return ""
-    except Exception as e:
-        time.sleep(interval)
-        return http_get(
-            url=url,
-            headers=headers,
-            params=params,
-            retry=retry - 1,
-            proxy=proxy,
-            interval=interval,
-        )
+        try:
+            return body.decode("utf8")
+        except UnicodeDecodeError:
+            try:
+                return gzip.decompress(body).decode("utf8")
+            except Exception:
+                return body.decode("utf8", errors="replace")
+
+    for attempt in range(max(1, retry)):
+        try:
+            request = urllib.request.Request(url=url, headers=headers)
+            if proxy and (proxy.startswith("https://") or proxy.startswith("http://")):
+                host, protocal = "", ""
+                if proxy.startswith("https://"):
+                    host, protocal = proxy[8:], "https"
+                else:
+                    host, protocal = proxy[7:], "http"
+                request.set_proxy(host=host, type=protocal)
+
+            response = urllib.request.urlopen(request, timeout=10, context=CTX)
+            content = decode_body(response.read())
+            if response.getcode() != 200:
+                return ""
+
+            return content
+        except urllib.error.HTTPError as e:
+            message = decode_body(e.read())
+            if e.code == 503 and "token" not in message and attempt < retry - 1:
+                time.sleep(interval)
+                continue
+            return ""
+        except urllib.error.URLError:
+            return ""
+        except Exception:
+            if attempt < retry - 1:
+                time.sleep(interval)
+                continue
+            return ""
+
+    return ""
 
 
 def get_telegram_pages(channel: str) -> int:
@@ -539,7 +533,7 @@ def get_telegram_pages(channel: str) -> int:
         regex = f'<link\s+rel="canonical"\s+href="/s/{channel}\?before=(\d+)">'
         groups = re.findall(regex, content)
         before = int(groups[0]) if groups else before
-    except:
+    except Exception:
         print(f"[CrawlError] cannot count page num, chanel: {channel}")
 
     return before
@@ -557,7 +551,7 @@ def extract_airport_site(url: str) -> list:
         regex = 'href="(https?://(?:[a-zA-Z0-9\u4e00-\u9fa5\-]+\.)+[a-zA-Z0-9\u4e00-\u9fa5\-]+/?)"\s+target="_blank"\s+rel="noopener">'
         groups = re.findall(regex, content)
         return list(set(groups)) if groups else []
-    except:
+    except Exception:
         return []
 
 
@@ -584,11 +578,20 @@ def crawl_channel(channel: str, page_num: int, fun: typing.Callable) -> list:
         cpu_count = multiprocessing.cpu_count()
         num = len(urls) if len(urls) <= cpu_count else cpu_count
 
-        pool = multiprocessing.Pool(num)
-        results = pool.map(fun, urls)
-        pool.close()
-
-        return list(itertools.chain.from_iterable(results))
+        pool = multiprocessing.Pool(num, maxtasksperchild=100)
+        try:
+            results = pool.map(fun, urls)
+            pool.close()
+            pool.join()
+            return list(itertools.chain.from_iterable(results))
+        except KeyboardInterrupt:
+            pool.terminate()
+            pool.join()
+            raise
+        except Exception:
+            pool.terminate()
+            pool.join()
+            raise
 
 
 def collect_airport(channel: str, page_num: int, thread_num: int = 50) -> list:
@@ -601,17 +604,32 @@ def collect_airport(channel: str, page_num: int, thread_num: int = 50) -> list:
         availables = manager.list()
         processes = []
         semaphore = multiprocessing.Semaphore(thread_num)
-        for domain in list(set(domains)):
-            semaphore.acquire()
-            p = multiprocessing.Process(target=validate_domain, args=(domain, availables, semaphore))
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+        try:
+            for domain in list(set(domains)):
+                semaphore.acquire()
+                p = multiprocessing.Process(target=validate_domain, args=(domain, availables, semaphore))
+                p.start()
+                processes.append(p)
+            for p in processes:
+                p.join()
+        except KeyboardInterrupt:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+            for p in processes:
+                p.join()
+            raise
+        except Exception:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+            for p in processes:
+                p.join()
+            raise
 
         domains = list(availables)
         print(
-            f"[AirPortCollector] finished collect air port from telegram channel: {channel}, availables: {len(domain)}"
+            f"[AirPortCollector] finished collect air port from telegram channel: {channel}, availables: {len(domains)}"
         )
         return domains
 
@@ -755,9 +773,19 @@ if __name__ == "__main__":
         cpu_count = multiprocessing.cpu_count()
         num = len(tasks) if len(tasks) <= cpu_count else cpu_count
 
-        pool = multiprocessing.Pool(num)
-        pool.starmap(scan, tasks)
-        pool.close()
+        pool = multiprocessing.Pool(num, maxtasksperchild=100)
+        try:
+            pool.starmap(scan, tasks)
+            pool.close()
+            pool.join()
+        except KeyboardInterrupt:
+            pool.terminate()
+            pool.join()
+            raise
+        except Exception:
+            pool.terminate()
+            pool.join()
+            raise
     else:
         domain = extract_domain(args.address)
         if not domain:

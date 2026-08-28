@@ -36,14 +36,17 @@ def fetch(email: str, retry: int = 2) -> str:
         "user-agent": utils.USER_AGENT,
     }
 
-    try:
-        request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
-        response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
-        if response.getcode() == 200:
+    for attempt in range(max(1, retry)):
+        try:
+            request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
+            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+            if response.getcode() != 200:
+                continue
+
             content = response.read()
             try:
                 content = gzip.decompress(content).decode("utf8")
-            except:
+            except Exception:
                 content = str(content, encoding="utf8")
 
             fake_email, index = email, email.find("@")
@@ -61,28 +64,30 @@ def fetch(email: str, retry: int = 2) -> str:
 
             subscribe = str(base64.b64decode(groups[0]), encoding="UTF8")
             return subscribe
+        except Exception:
+            if attempt >= max(1, retry) - 1:
+                break
+            time.sleep(random.random())
 
-    except:
-        time.sleep(random.random())
-        return fetch(email, retry - 1)
+    return ""
 
 
 def getrss(params: dict) -> list:
-    if not params or type(params) != dict:
+    if not params or not isinstance(params, dict):
         return []
 
     emails = params.get("emails", [])
-    if emails and type(emails) == list:
+    if isinstance(emails, list) and emails:
         emails = [x for x in emails if re.match(r"^\w+([-+.]\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$", x)]
 
     config = params.get("config", {})
-    if not emails or not config or type(config) != dict or not config.get("push_to"):
+    if not emails or not isinstance(config, dict) or not config or not config.get("push_to"):
         logger.error(f"[V2RayFreeError] cannot fetch subscribes bcause missing some parameters")
         return []
 
     include = params.get("include", "").strip()
     storage = params.get("storage", {})
-    if not storage or type(storage) != dict:
+    if not storage or not isinstance(storage, dict):
         logger.error(f"[V2RayFreeError] cannot fetch subscribes bcause storage config is invalidate")
         return []
 
@@ -133,12 +138,12 @@ def load(config: push.PushConfig, persist: dict) -> dict:
         content = utils.http_get(url=url)
         data = json.loads(content)
         return filter(data=data)
-    except:
+    except Exception:
         return {}
 
 
 def filter(data: dict) -> dict:
-    if not data or type(data) != dict:
+    if not data or not isinstance(data, dict):
         return {}
 
     emails, subscribes = list(data.keys()), list(data.values())

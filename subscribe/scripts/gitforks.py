@@ -55,7 +55,7 @@ def query_forks_count(username: str, repository: str, retry: int = 3) -> int:
     try:
         data = json.loads(content)
         return data.get("forks_count", 0)
-    except:
+    except Exception:
         logger.error(f"[GithubFork] occur error when parse forks count, message: {content}")
         return -1
 
@@ -77,17 +77,18 @@ def query_forks(username: str, repository: str, page: int, peer: int = 100, sort
     )
     subscriptions, starttime = {fullname: source}, time.time()
 
-    content, retry = "", 5
-    while not content and retry > 0:
+    content = ""
+    for attempt in range(5):
         content = utils.http_get(url=url, headers=DEFAULT_HEADERS, interval=1.0)
-        retry -= 1
-        if not content:
+        if content:
+            break
+        if attempt < 4:
             time.sleep(2)
 
     try:
         data = json.loads(content)
         for fork in data:
-            if not fork or type(fork) != dict:
+            if not fork or not isinstance(fork, dict):
                 continue
 
             fullname = fork.get("full_name", "")
@@ -97,7 +98,7 @@ def query_forks(username: str, repository: str, page: int, peer: int = 100, sort
             subs = [f"{GITHUB_CONTENT_API}/{fullname}/{branch}/{s}" for s in SUBSCRIBE_FILES]
 
             subscriptions[fullname] = (links, subs)
-    except:
+    except Exception:
         logger.error(f"[GithubFork] cannot fetch forks for page: {page}, message: {content}")
 
     cost = "{:.2f}s".format(time.time() - starttime)
@@ -121,7 +122,7 @@ def collect_subs(params: dict) -> list[dict]:
 
         return f"{ghproxy}/{url}"
 
-    if not params or type(params) != dict:
+    if not params or not isinstance(params, dict):
         return []
 
     username = utils.trim(params.get("username", "wzdnzd"))
@@ -133,7 +134,7 @@ def collect_subs(params: dict) -> list[dict]:
 
     # used to store subscriptions
     storage = params.get("storage", {})
-    if not storage or type(storage) != dict:
+    if not storage or not isinstance(storage, dict):
         logger.error(f"[GithubFork] cannot fetch subscriptions due to invalid storage config")
         return []
 
@@ -206,16 +207,16 @@ def collect_subs(params: dict) -> list[dict]:
     try:
         remain = max(params.get("remain", 0), 0)
         life = max(params.get("life", 0), 0)
-    except:
+    except Exception:
         logger.warning(f"[GithubFork] invalid remain or life, set to 0")
         remain, life = 0, 0
 
     for result in results:
-        if not result or type(result) != dict:
+        if not result or not isinstance(result, dict):
             continue
 
         for name, links in result.items():
-            if not links or type(links) != tuple:
+            if not links or not isinstance(links, tuple):
                 continue
 
             name = re.sub(r"/|_", "-", name, flags=re.I).lower()

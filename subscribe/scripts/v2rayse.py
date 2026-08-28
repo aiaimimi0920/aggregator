@@ -86,7 +86,7 @@ def detect(proxies: list, nopublic: bool, exclude: str, ignore: str, repeat: int
 
     count = 0
     for p in proxies:
-        if not p or type(p) != dict:
+        if not p or not isinstance(p, dict):
             continue
 
         name = str(p.get("name", ""))
@@ -96,7 +96,7 @@ def detect(proxies: list, nopublic: bool, exclude: str, ignore: str, repeat: int
 
             if re.search(exclude, name, flags=re.I):
                 count += 1
-        except:
+        except Exception:
             logger.error(
                 f"[V2RaySE] invalid regex, ignore: {ignore}, exclude: {exclude}, message: \n{traceback.format_exc()}"
             )
@@ -163,11 +163,11 @@ def list_files(base: str, date: str, maxsize: int, last: datetime) -> list[str]:
                         modified = datetime.fromisoformat(updated_at[:-1]).replace(tzinfo=timezone.utc)
                         if modified < last:
                             continue
-                except:
+                except Exception:
                     logger.error(f"[V2RaySE] parse details of the file {name} error")
 
                 files.append(f"{base}/{name}")
-        except:
+        except Exception:
             logger.error(f"[V2RaySE] list files error, date: {date}, marker: {marker}")
 
     return files
@@ -200,7 +200,7 @@ def fetchone(
             )
             if parts:
                 subscriptions.extend([utils.trim(p) for p in parts])
-        except:
+        except Exception:
             pass
 
     if not noproxies:
@@ -235,16 +235,16 @@ def fetchone(
                         if outbound.get("type", "") == "tuic":
                             logger.info(f"[V2RaySE] found tuic outbound in url: {url}")
                             break
-                except:
+                except Exception:
                     pass
-        except:
-            logger.error(f"[V2RaySE] parse proxies failed, url: {url}, message: \n{traceback.format_exc()}")
+        except Exception:
+            logger.exception(f"[V2RaySE] parse proxies failed, url: {url}")
 
     return proxies, list(set(subscriptions)) if subscriptions else []
 
 
 def fetch(params: dict) -> list:
-    if not params or type(params) != dict:
+    if not params or not isinstance(params, dict):
         return []
 
     domain = utils.extract_domain(params.get("url", ""), include_protocal=True)
@@ -256,7 +256,7 @@ def fetch(params: dict) -> list:
     pushtool = push.get_instance(config=push.PushConfig.from_dict(storage))
 
     persist = storage.get("items", {})
-    if not persist or type(persist) != dict or not pushtool.validate(config=persist.get("proxies", {})):
+    if not persist or not isinstance(persist, dict) or not pushtool.validate(config=persist.get("proxies", {})):
         logger.error(f"[V2RaySE] invalid persist config, please check it and try again")
         return []
 
@@ -279,7 +279,7 @@ def fetch(params: dict) -> list:
     last = last_history(url=history_url, interval=interval)
 
     dates, manual = params.get("dates", []), True
-    if not dates or type(dates) != list:
+    if not isinstance(dates, list) or not dates:
         dates, manual = get_dates(last=last), False
 
     begin = current_time(utc=True).strftime(DATE_FORMAT)

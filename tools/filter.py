@@ -91,20 +91,25 @@ def http_get(url: str, headers: dict = None, retry: int = 3, timeout: int = 6) -
     timeout = max(timeout, 1)
     headers = DEFAULT_HTTP_HEADERS if not headers else headers
 
-    try:
-        request = urllib.request.Request(url=url, headers=headers)
-        response = urllib.request.urlopen(request, timeout=timeout, context=CTX)
-        status, content = response.getcode(), ""
-        if status == 200:
-            content = response.read()
-            try:
-                content = str(content, encoding="utf8")
-            except:
-                content = gzip.decompress(content).decode("utf8")
+    for _ in range(retry):
+        try:
+            request = urllib.request.Request(url=url, headers=headers)
+            response = urllib.request.urlopen(request, timeout=timeout, context=CTX)
+            status, content = response.getcode(), ""
+            if status == 200:
+                payload = response.read()
+                try:
+                    content = payload.decode("utf8")
+                except UnicodeDecodeError:
+                    content = gzip.decompress(payload).decode("utf8")
+                except Exception:
+                    content = payload.decode("utf8", errors="replace")
 
-        return status, content
-    except:
-        return http_get(url=url, headers=headers, retry=retry - 1, timeout=timeout)
+            return status, content
+        except Exception:
+            continue
+
+    return 400, ""
 
 
 def fetch_proxies(prefix: str, provider: str, headers: dict, retry: int = 3) -> list[dict]:
@@ -112,7 +117,7 @@ def fetch_proxies(prefix: str, provider: str, headers: dict, retry: int = 3) -> 
     _, content = http_get(url=url, headers=headers, retry=retry, timeout=30)
     try:
         return json.loads(content).get("proxies", [])
-    except:
+    except Exception:
         return []
 
 
@@ -165,7 +170,7 @@ def reload(prefix: str, secret: str, retry: int = 3) -> bool:
             response = urllib.request.urlopen(request, timeout=10, context=CTX)
             if response.getcode() == 204:
                 success = True
-        except:
+        except Exception:
             pass
 
         count += 1
@@ -183,7 +188,7 @@ def get_headers(secret: str = "") -> dict:
 
 
 def trim(text: str) -> str:
-    if not text or type(text) != str:
+    if not text or not isinstance(text, str):
         return ""
 
     return text.strip()
@@ -223,20 +228,29 @@ def running(name):
 
 
 def batch(func: typing.Callable, params: list) -> list:
-    if not func or not params or type(params) != list:
+    if not callable(func) or not isinstance(params, list) or not params:
         return []
 
     cpu_count = multiprocessing.cpu_count()
     num = len(params) if len(params) <= cpu_count else cpu_count
 
-    pool = multiprocessing.Pool(num)
-    if type(params[0]) == list or type(params[0]) == tuple:
-        results = pool.starmap(func, params)
-    else:
-        results = pool.map(func, params)
-    pool.close()
-
-    return results
+    pool = multiprocessing.Pool(num, maxtasksperchild=100)
+    try:
+        if isinstance(params[0], (list, tuple)):
+            results = pool.starmap(func, params)
+        else:
+            results = pool.map(func, params)
+        pool.close()
+        pool.join()
+        return results
+    except KeyboardInterrupt:
+        pool.terminate()
+        pool.join()
+        raise
+    except Exception:
+        pool.terminate()
+        pool.join()
+        raise
 
 
 def process(

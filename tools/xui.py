@@ -40,29 +40,35 @@ USER_AGENT = (
 )
 
 
-def http_post(url: str, headers: dict = None, params: dict = {}, retry: int = 3, timeout: float = 6) -> HTTPResponse:
-    if params is None or type(params) != dict:
+def http_post(url: str, headers: dict = None, params: dict = None, retry: int = 3, timeout: float = 6) -> HTTPResponse:
+    if params is None or not isinstance(params, dict):
         return None
 
-    timeout, retry = max(timeout, 1), retry - 1
-    try:
-        data = b""
-        if params and isinstance(params, dict):
-            data = urllib.parse.urlencode(params).encode(encoding="utf8")
+    timeout = max(timeout, 1)
+    if not headers:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+        }
+    data = urllib.parse.urlencode(params).encode(encoding="utf8") if params else b""
 
-        request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
-        return urllib.request.urlopen(request, timeout=timeout, context=CTX)
-    except urllib.error.HTTPError as e:
-        if retry < 0 or e.code in [400, 401, 405]:
-            return None
+    for attempt in range(max(1, retry)):
+        try:
+            request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
+            return urllib.request.urlopen(request, timeout=timeout, context=CTX)
+        except urllib.error.HTTPError as e:
+            if e.code in [400, 401, 405]:
+                return None
+            if attempt >= retry - 1:
+                return None
+        except (TimeoutError, urllib.error.URLError):
+            if attempt >= retry - 1:
+                return None
+        except Exception:
+            if attempt >= retry - 1:
+                return None
 
-        return http_post(url=url, headers=headers, params=params, retry=retry, timeout=timeout)
-    except (TimeoutError, urllib.error.URLError) as e:
-        return None
-    except Exception:
-        if retry < 0:
-            return None
-        return http_post(url=url, headers=headers, params=params, retry=retry, timeout=timeout)
+    return None
 
 
 def read_response(response: HTTPResponse, expected: int = 200, deserialize: bool = False, key: str = "") -> typing.Any:
@@ -75,14 +81,14 @@ def read_response(response: HTTPResponse, expected: int = 200, deserialize: bool
 
     try:
         text = response.read()
-    except:
+    except Exception:
         text = b""
 
     try:
         content = text.decode(encoding="UTF8")
     except UnicodeDecodeError:
         content = gzip.decompress(text).decode("UTF8")
-    except:
+    except Exception:
         content = ""
 
     if not deserialize:
@@ -93,12 +99,12 @@ def read_response(response: HTTPResponse, expected: int = 200, deserialize: bool
     try:
         data = json.loads(content)
         return data if not key else data.get(key, None)
-    except:
+    except Exception:
         return None
 
 
 def trim(text: str) -> str:
-    if not text or type(text) != str:
+    if not text or not isinstance(text, str):
         return ""
 
     return text.strip()
@@ -125,7 +131,7 @@ def write_file(filename: str, lines: str | list, overwrite: bool = True) -> None
 
         # release lock
         FILE_LOCK.release()
-    except:
+    except Exception:
         print(f"write {lines} to file {filename} failed")
 
 
@@ -235,12 +241,13 @@ def download_mmdb(repo: str, target: str, filepath: str, retry: int = 3):
         raise Exception("no download url found in github release")
 
     download(download_url, filepath, target, retry)
+    return True
 
 
 def download(url: str, filepath: str, filename: str, retry: int = 3) -> None:
     """Download file from url to filepath with filename"""
 
-    if retry < 0:
+    if retry <= 0:
         raise Exception("archieved max retry count for download")
 
     url = trim(url)
@@ -262,13 +269,20 @@ def download(url: str, filepath: str, filename: str, retry: int = 3) -> None:
     if os.path.exists(fullpath) and os.path.isfile(fullpath):
         os.remove(fullpath)
 
-    # download target file from github release to fullpath
-    try:
-        urllib.request.urlretrieve(url=url, filename=fullpath)
-    except Exception:
-        return download(url, filepath, filename, retry - 1)
+    last_error = None
+    for attempt in range(retry):
+        try:
+            # download target file from github release to fullpath
+            urllib.request.urlretrieve(url=url, filename=fullpath)
+            print(f"download file {filename} to {fullpath} success")
+            return
+        except Exception as error:
+            last_error = error
+            if attempt >= retry - 1:
+                break
+            time.sleep(random.random())
 
-    print(f"download file {filename} to {fullpath} success")
+    raise Exception(f"failed to download {filename} from {url}: {last_error}")
 
 
 def load_mmdb(
@@ -276,8 +290,7 @@ def load_mmdb(
 ) -> database.Reader:
     filepath = os.path.join(directory, filename)
     if update or not os.path.exists(filepath) or not os.path.isfile(filepath):
-        if not download_mmdb(repo, filename, directory):
-            return None
+        download_mmdb(repo, filename, directory)
 
     return database.Reader(filepath)
 
@@ -404,7 +417,7 @@ def generate_subscription_links(data: dict, address: str, reader: database.Reade
 def check(url: str, filepath: str, reader: database.Reader) -> RunningState:
     try:
         address = parse.urlparse(url=url).hostname
-    except:
+    except Exception:
         print(f"cannot extract host from url: {url}")
         return None
 
@@ -437,11 +450,14 @@ def multi_thread_run(
 
     if num_threads is None or num_threads <= 0:
         num_threads = min(len(tasks), (os.cpu_count() or 1) * 2)
+    else:
+        num_threads = min(len(tasks), max(1, num_threads))
 
     funcname = getattr(func, "__name__", repr(func))
 
     results, starttime = [None] * len(tasks), time.time()
-    with futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+    executor = futures.ThreadPoolExecutor(max_workers=num_threads)
+    try:
         if isinstance(tasks[0], (list, tuple)):
             collections = {executor.submit(func, *param): i for i, param in enumerate(tasks)}
         else:
@@ -457,8 +473,15 @@ def multi_thread_run(
                 result = future.result()
                 index = collections[future]
                 results[index] = result
-            except:
+            except Exception:
                 print(f"function {funcname} execution generated an exception, message:\n{traceback.format_exc()}")
+    except KeyboardInterrupt:
+        for future in list(locals().get("collections", {}).keys()):
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=False)
 
     print(f"[Concurrent] execute [{funcname}] finished, count: {len(tasks)}, cost: {time.time()-starttime:.2f}s")
     return results

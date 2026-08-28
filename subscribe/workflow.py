@@ -148,7 +148,7 @@ def executewrapper(task_conf: TaskConfig) -> tuple[int, list]:
 
 
 def liveness_fillter(proxies: list) -> tuple[list, list]:
-    if not list:
+    if not proxies:
         return [], []
 
     checks, nochecks = [], []
@@ -167,7 +167,7 @@ def liveness_fillter(proxies: list) -> tuple[list, list]:
     return checks, nochecks
 
 
-def cleanup(filepath: str = "", filenames: list = []) -> None:
+def cleanup(filepath: str = "", filenames: list = None) -> None:
     if not filepath or not filenames:
         return
 
@@ -211,7 +211,7 @@ def exists(tasks: list, task: TaskConfig) -> bool:
                 item.exclude = "|".join([item.exclude, task.exclude]).removeprefix("|")
             if task.include:
                 item.include = "|".join([item.include, task.include]).removeprefix("|")
-        break
+            break
 
     return found
 
@@ -221,16 +221,16 @@ def merge_config(configs: list) -> list:
         if not raw or not target:
             return False
 
-        rsub = raw.get("sub").strip()
+        rsub = utils.trim(raw.get("sub", ""))
         tsub = target.get("sub", "")
         if not tsub:
             if rsub:
                 return False
-            return raw.get("domain", "").strip() == target.get("domain", "").strip()
+            return utils.trim(raw.get("domain", "")) == utils.trim(target.get("domain", ""))
         if isinstance(tsub, str):
-            return rsub == tsub.strip()
+            return rsub == utils.trim(tsub)
         for sub in tsub:
-            if rsub == sub.strip():
+            if rsub == utils.trim(sub):
                 return True
         return False
 
@@ -306,8 +306,8 @@ def refresh(config: dict, push: PushTo, alives: dict, filepath: str = "", skip_r
                     content = json.dumps(data)
                     push.push_to(content=content, config=pushconf, group="crawled-remark")
                     logger.info(f"[UpdateInfo] found {count} invalid crawled subscriptions")
-            except:
-                logger.error(f"[UpdateError] remark invalid crawled subscriptions failed")
+            except Exception:
+                logger.exception("[UpdateError] remark invalid crawled subscriptions failed")
 
     update_conf = config.get("update", {})
     if not update_conf.get("enable", False):
