@@ -4,16 +4,16 @@
 # @Time    : 2022-07-15
 
 import io
-import json
 import mimetypes
+import json
 import os
 import traceback
 import urllib
 import urllib.request
-from dataclasses import dataclass
 from http.client import HTTPResponse
 
 import utils
+from config.models import StorageConfig, StorageItem
 from logger import logger
 from urlvalidator import isurl
 
@@ -47,10 +47,10 @@ class PushTo(object):
                 f.flush()
 
             return True
-        except Exception:
+        except:
             return False
 
-    def push_file(self, filepath: str, config: dict, group: str = "", retry: int = 5) -> bool:
+    def push_file(self, filepath: str, item: StorageItem, group: str = "", retry: int = 5) -> bool:
         if not os.path.exists(filepath) or not os.path.isfile(filepath):
             logger.error(f"[PushFileError] file {filepath} not found")
             return False
@@ -59,75 +59,77 @@ class PushTo(object):
         with open(filepath, "r", encoding="utf8") as f:
             content = f.read()
 
-        return self.push_to(content=content, config=config, group=group, retry=retry)
+        return self.push_to(content=content, item=item, group=group, retry=retry)
 
-    def push_to(self, content: str, config: dict, group: str = "", retry: int = 5, **kwargs) -> bool:
-        if not self.validate(config=config):
+    def push_to(self, content: str, item: StorageItem, group: str = "", retry: int = 5, **kwargs: object) -> bool:
+        if not self.validate(item=item):
             logger.error(f"[PushError] push config is invalidate, domain: {self.name}")
             return False
 
-        if config.get("local", ""):
-            self._storage(content=content, filename=config.get("local"))
+        if item.local:
+            self._storage(content=content, filename=item.local)
 
-        url, data, headers = self._generate_payload(content=content, config=config)
+        url, data, headers = self._generate_payload(content=content, item=item)
         payload = kwargs.get("payload", None)
         if payload and isinstance(payload, dict):
             try:
                 data = json.dumps(payload).encode("UTF8")
-            except Exception:
+            except:
                 logger.error(f"[PushError] invalid payload, domain: {self.name}")
                 return False
 
-        for attempt in range(max(1, retry)):
-            try:
-                request = urllib.request.Request(url=url, data=data, headers=headers, method=self.method)
-                response = urllib.request.urlopen(request, timeout=60, context=utils.CTX)
-                if self._is_success(response):
-                    logger.info(f"[PushSuccess] push subscribes information to {self.name} successed, group=[{group}]")
-                    return True
-
+        try:
+            request = urllib.request.Request(url=url, data=data, headers=headers, method=self.method)
+            response = urllib.request.urlopen(request, timeout=60, context=utils.CTX)
+            if self._is_success(response):
+                logger.info(f"[PushSuccess] push subscribes information to {self.name} successed, group=[{group}]")
+                return True
+            else:
                 logger.info(
                     "[PushError]: group=[{}], name: {}, error message: \n{}".format(
                         group, self.name, response.read().decode("unicode_escape")
                     )
                 )
                 return False
-            except Exception as e:
-                try:
-                    if isinstance(e, urllib.error.HTTPError):
-                        code = getattr(e, "code", None)
-                        try:
-                            message = e.read().decode("utf-8", errors="replace")
-                        except Exception:
-                            message = "cannot read error messgae from response"
-                        logger.error(
-                            f"[PushError] request failed, code: {code}, url: {url}, message: {message}, data: {data}"
-                        )
-                except Exception:
-                    logger.error(f"[PushError] failed to process exception: {traceback.format_exc()}")
 
-                self._error_handler(group=group)
-                if attempt >= max(1, retry) - 1:
-                    break
+        except Exception as e:
+            try:
+                if isinstance(e, urllib.error.HTTPError):
+                    code = getattr(e, "code", None)
+                    try:
+                        message = e.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        message = "cannot read error messgae from response"
+                    logger.error(
+                        f"[PushError] request failed, code: {code}, url: {url}, message: {message}, data: {data}"
+                    )
+            except Exception:
+                logger.error(f"[PushError] failed to process exception: {traceback.format_exc()}")
 
-        return False
+            self._error_handler(group=group)
+
+            retry -= 1
+            if retry > 0:
+                return self.push_to(content, item, group, retry)
+
+            return False
 
     def _is_success(self, response: HTTPResponse) -> bool:
         return response and response.getcode() == 200
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
         raise NotImplementedError
 
     def _error_handler(self, group: str = "") -> None:
         logger.error(f"[PushError]: group=[{group}], name: {self.name}, error message: \n{traceback.format_exc()}")
 
-    def validate(self, config: dict) -> bool:
+    def validate(self, item: StorageItem) -> bool:
         raise NotImplementedError
 
-    def filter_push(self, config: dict) -> dict:
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
         raise NotImplementedError
 
-    def raw_url(self, config: dict) -> str:
+    def raw_url(self, item: StorageItem) -> str:
         raise NotImplementedError
 
 
@@ -150,18 +152,18 @@ class PushToPasteGG(PushTo):
         self.domain = domain
         self.api_address = f"{base}/v1/pastes"
 
-    def validate(self, config: dict) -> bool:
-        if not isinstance(config, dict) or not config:
+    def validate(self, item: StorageItem) -> bool:
+        if not isinstance(item, StorageItem):
             return False
 
-        folderid = config.get("folderid", "")
-        fileid = config.get("fileid", "")
+        folder_id = item.folder_id
+        file_id = item.file_id
 
-        return "" != self.token.strip() and "" != folderid.strip() and "" != fileid.strip()
+        return "" != self.token.strip() and "" != folder_id.strip() and "" != file_id.strip()
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        folderid = config.get("folderid", "")
-        fileid = config.get("fileid", "")
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        folder_id = item.folder_id
+        file_id = item.file_id
 
         headers = {
             "Authorization": f"Key {self.token}",
@@ -169,7 +171,7 @@ class PushToPasteGG(PushTo):
             "User-Agent": utils.USER_AGENT,
         }
         data = json.dumps({"content": {"format": "text", "value": content}}).encode("UTF8")
-        url = f"{self.api_address}/{folderid}/files/{fileid}"
+        url = f"{self.api_address}/{folder_id}/files/{file_id}"
 
         return url, data, headers
 
@@ -179,28 +181,26 @@ class PushToPasteGG(PushTo):
     def _error_handler(self, group: str = "") -> None:
         logger.error(f"[PushError]: group=[{group}], name: {self.name}, error message: \n{traceback.format_exc()}")
 
-    def filter_push(self, config: dict) -> dict:
-        if not isinstance(config, dict):
-            return {}
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
         records = {}
-        for k, v in config.items():
-            if self.token and v.get("folderid", "") and v.get("fileid", "") and v.get("username", ""):
+        for k, v in items.items():
+            if self.token and v.folder_id and v.file_id and v.username:
                 records[k] = v
 
         return records
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config:
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem):
             return ""
 
-        fileid = config.get("fileid", "")
-        folderid = config.get("folderid", "")
-        username = config.get("username", "")
+        file_id = item.file_id
+        folder_id = item.folder_id
+        username = item.username
 
-        if not fileid or not folderid or not username:
+        if not file_id or not folder_id or not username:
             return ""
 
-        return f"{self.domain}/p/{username}/{folderid}/files/{fileid}/raw"
+        return f"{self.domain}/p/{username}/{folder_id}/files/{file_id}/raw"
 
 
 class PushToDevbin(PushToPasteGG):
@@ -217,25 +217,23 @@ class PushToDevbin(PushToPasteGG):
         self.domain = base
         self.api_address = f"{base}/api/v3/paste"
 
-    def validate(self, config: dict) -> bool:
-        if not isinstance(config, dict) or not config:
+    def validate(self, item: StorageItem) -> bool:
+        if not isinstance(item, StorageItem):
             return False
 
-        fileid = config.get("fileid", "")
-        return "" != self.token.strip() and "" != fileid.strip()
+        file_id = item.file_id
+        return "" != self.token.strip() and "" != file_id.strip()
 
-    def filter_push(self, config: dict) -> dict:
-        if not isinstance(config, dict):
-            return {}
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
         records = {}
-        for k, v in config.items():
-            if v.get("fileid", "") and self.token:
+        for k, v in items.items():
+            if v.file_id and self.token:
                 records[k] = v
 
         return records
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        fileid = config.get("fileid", "")
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        file_id = item.file_id
 
         headers = {
             "Authorization": self.token,
@@ -243,19 +241,19 @@ class PushToDevbin(PushToPasteGG):
             "Accept": "*/*",
         }
         data = json.dumps({"content": content, "syntaxName": "auto"}).encode("UTF8")
-        url = f"{self.api_address}/{fileid}"
+        url = f"{self.api_address}/{file_id}"
 
         return url, data, headers
 
     def _is_success(self, response: HTTPResponse) -> bool:
         return response and response.getcode() == 201
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config or not config.get("fileid", ""):
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem) or not item.file_id:
             return ""
 
-        fileid = config.get("fileid", "")
-        return f"{self.domain}/Raw/{fileid}"
+        file_id = item.file_id
+        return f"{self.domain}/Raw/{file_id}"
 
 
 class PushToPastefy(PushToDevbin):
@@ -273,8 +271,8 @@ class PushToPastefy(PushToDevbin):
         self.domain = base
         self.api_address = f"{base}/api/v2/paste"
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        fileid = config.get("fileid", "")
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        file_id = item.file_id
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -283,7 +281,7 @@ class PushToPastefy(PushToDevbin):
             "User-Agent": utils.USER_AGENT,
         }
         data = json.dumps({"content": content}).encode("UTF8")
-        url = f"{self.api_address}/{fileid}"
+        url = f"{self.api_address}/{file_id}"
 
         return url, data, headers
 
@@ -293,21 +291,21 @@ class PushToPastefy(PushToDevbin):
 
         try:
             return json.loads(response.read()).get("success", "false")
-        except Exception:
+        except:
             return False
 
     def _error_handler(self, group: str = "") -> None:
         logger.error(f"[PushError]: group=[{group}], name: {self.name}, error message: \n{traceback.format_exc()}")
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config:
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem):
             return ""
 
-        fileid = utils.trim(config.get("fileid", ""))
-        if not fileid:
+        file_id = utils.trim(item.file_id)
+        if not file_id:
             return ""
 
-        return f"{self.domain}/{fileid}/raw"
+        return f"{self.domain}/{file_id}/raw"
 
 
 class PushToImperial(PushToPasteGG):
@@ -329,32 +327,30 @@ class PushToImperial(PushToPasteGG):
         self.domain = domain
         self.api_address = f"{base}/v1/document"
 
-    def raw_url(self, config: dict) -> str:
-        if not self.validate(config):
+    def raw_url(self, item: StorageItem) -> str:
+        if not self.validate(item):
             return ""
 
-        fileid = config.get("fileid", "")
-        return f"{self.domain}/r/{fileid}"
+        file_id = item.file_id
+        return f"{self.domain}/r/{file_id}"
 
-    def validate(self, config: dict) -> bool:
-        if not isinstance(config, dict) or not config:
+    def validate(self, item: StorageItem) -> bool:
+        if not isinstance(item, StorageItem):
             return False
 
-        fileid = config.get("fileid", "")
-        return "" != self.token.strip() and "" != fileid.strip()
+        file_id = item.file_id
+        return "" != self.token.strip() and "" != file_id.strip()
 
-    def filter_push(self, config: dict) -> dict:
-        if not isinstance(config, dict):
-            return {}
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
         records = {}
-        for k, v in config.items():
-            if v.get("fileid", "") and self.token:
+        for k, v in items.items():
+            if v.file_id and self.token:
                 records[k] = v
 
         return records
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        fileid = config.get("fileid", "")
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        file_id = item.file_id
 
         headers = {
             "Authorization": self.token,
@@ -363,7 +359,7 @@ class PushToImperial(PushToPasteGG):
             "User-Agent": utils.USER_AGENT,
         }
 
-        data = json.dumps({"id": fileid, "content": content}).encode("UTF8")
+        data = json.dumps({"id": file_id, "content": content}).encode("UTF8")
         return self.api_address, data, headers
 
     def _is_success(self, response: HTTPResponse) -> bool:
@@ -372,7 +368,7 @@ class PushToImperial(PushToPasteGG):
 
         try:
             return json.loads(response.read()).get("success", "false")
-        except Exception:
+        except:
             return False
 
 
@@ -381,33 +377,27 @@ class PushToLocal(PushTo):
         super().__init__(token="")
         self.name = "local"
 
-    def validate(self, config: dict) -> bool:
-        return isinstance(config, dict) and bool(config.get("fileid", ""))
+    def validate(self, item: StorageItem) -> bool:
+        return isinstance(item, StorageItem) and bool(item.file_id)
 
-    def push_to(self, content: str, config: dict, group: str = "", retry: int = 5) -> bool:
-        if not self.validate(config):
-            logger.error(f"[PushError] push config is invalidate, domain: {self.name}")
-            return False
-
-        folder = config.get("folderid", "")
-        filename = config.get("fileid", "")
+    def push_to(self, content: str, item: StorageItem, group: str = "", retry: int = 5) -> bool:
+        folder = item.folder_id
+        filename = item.file_id
         success = self._storage(content=content, filename=filename, folder=folder)
         message = "successed" if success else "failed"
         logger.info(f"[PushInfo] push subscribes information to {self.name} {message}, group=[{group}]")
         return success
 
-    def filter_push(self, config: dict) -> dict:
-        if not isinstance(config, dict):
-            return {}
-        return {k: v for k, v in config.items() if v.get("fileid", "")}
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
+        return {k: v for k, v in items.items() if isinstance(v, StorageItem) and v.file_id}
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config:
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem):
             return ""
 
-        fileid = config.get("fileid", "")
-        folderid = config.get("folderid", "")
-        filepath = os.path.abspath(os.path.join(folderid, fileid))
+        file_id = item.file_id
+        folder_id = item.folder_id
+        filepath = os.path.abspath(os.path.join(folder_id, file_id))
         return f"{utils.FILEPATH_PROTOCAL}{filepath}"
 
 
@@ -420,20 +410,20 @@ class PushToGist(PushTo):
         self.domain = "https://gist.githubusercontent.com"
         self.method = "PATCH"
 
-    def validate(self, config: dict) -> bool:
-        if not isinstance(config, dict):
+    def validate(self, item: StorageItem) -> bool:
+        if not isinstance(item, StorageItem):
             return False
 
-        gistid = config.get("gistid", "")
-        filename = config.get("filename", "")
+        gist_id = item.gist_id
+        filename = item.filename
 
-        return "" != self.token.strip() and "" != gistid.strip() and "" != filename.strip()
+        return "" != self.token.strip() and "" != gist_id.strip() and "" != filename.strip()
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        gistid = config.get("gistid", "")
-        filename = config.get("filename", "")
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        gist_id = item.gist_id
+        filename = item.filename
 
-        url = f"{self.api_address}/{gistid}"
+        url = f"{self.api_address}/{gist_id}"
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self.token}",
@@ -448,29 +438,25 @@ class PushToGist(PushTo):
     def _is_success(self, response: HTTPResponse) -> bool:
         return response and response.getcode() == 200
 
-    def filter_push(self, config: dict) -> dict:
-        if not self.token or not isinstance(config, dict):
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
+        if not self.token or not isinstance(items, dict):
             return {}
 
-        return {
-            k: v
-            for k, v in config.items()
-            if k and isinstance(v, dict) and v.get("gistid", "") and v.get("filename", "")
-        }
+        return {k: v for k, v in items.items() if k and isinstance(v, StorageItem) and v.gist_id and v.filename}
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config:
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem):
             return ""
 
-        username = utils.trim(config.get("username", ""))
-        gistid = utils.trim(config.get("gistid", ""))
-        revision = utils.trim(config.get("revision", ""))
-        filename = utils.trim(config.get("filename", ""))
+        username = utils.trim(item.username)
+        gist_id = utils.trim(item.gist_id)
+        revision = utils.trim(item.revision)
+        filename = utils.trim(item.filename)
 
-        if not username or not gistid or not filename:
+        if not username or not gist_id or not filename:
             return ""
 
-        prefix = f"{self.domain}/{username}/{gistid}"
+        prefix = f"{self.domain}/{username}/{gist_id}"
         if revision:
             return f"{prefix}/raw/{revision}/{filename}"
 
@@ -492,17 +478,17 @@ class PushToQBin(PushToPastefy):
         self.domain = base
         self.api_address = f"{base}/save"
 
-    def validate(self, config: dict) -> bool:
-        if not isinstance(config, dict) or not config:
+    def validate(self, item: StorageItem) -> bool:
+        if not isinstance(item, StorageItem):
             return False
 
-        fileid = config.get("fileid", "")
-        return "" != self.token.strip() and "" != utils.trim(fileid)
+        file_id = item.file_id
+        return "" != self.token.strip() and "" != utils.trim(file_id)
 
-    def _generate_payload(self, content: str, config: dict) -> tuple[str, str, dict]:
-        fileid = config.get("fileid", "")
-        password = config.get("password", "")
-        expire = config.get("expire", 0)
+    def _generate_payload(self, content: str, item: StorageItem) -> tuple[str, str, dict]:
+        file_id = item.file_id
+        password = item.password
+        expire = item.expire
 
         headers = {
             "Cookie": f"token={self.token}",
@@ -513,7 +499,7 @@ class PushToQBin(PushToPastefy):
         if isinstance(expire, int) and expire > 0:
             headers["x-expire"] = str(expire)
 
-        url = f"{self.api_address}/{fileid}"
+        url = f"{self.api_address}/{file_id}"
         if password:
             url = f"{url}/{password}"
 
@@ -526,30 +512,28 @@ class PushToQBin(PushToPastefy):
         try:
             result = json.loads(response.read())
             return result.get("status", 403) == 200
-        except Exception:
+        except:
             return False
 
-    def filter_push(self, config: dict) -> dict:
-        if not isinstance(config, dict):
-            return {}
+    def filter_push(self, items: dict[str, StorageItem]) -> dict[str, StorageItem]:
         records = {}
-        for k, v in config.items():
-            if v.get("fileid", "") and self.token:
+        for k, v in items.items():
+            if v.file_id and self.token:
                 records[k] = v
 
         return records
 
-    def raw_url(self, config: dict) -> str:
-        if not isinstance(config, dict) or not config:
+    def raw_url(self, item: StorageItem) -> str:
+        if not isinstance(item, StorageItem):
             return ""
 
-        fileid = utils.trim(config.get("fileid", ""))
-        password = utils.trim(config.get("password", ""))
+        file_id = utils.trim(item.file_id)
+        password = utils.trim(item.password)
 
-        if not fileid:
+        if not file_id:
             return ""
 
-        url = f"{self.domain}/r/{fileid}"
+        url = f"{self.domain}/r/{file_id}"
         if password:
             url = f"{url}/{password}"
 
@@ -600,12 +584,17 @@ class PushToR2(PushTo):
             logger.error(f"[PushError] failed to initialize r2 client: \n{traceback.format_exc()}")
             return None
 
+    @staticmethod
+    def _item_dict(item):
+        return item.to_dict() if isinstance(item, StorageItem) else item
+
     def _bucket_key(self, config: dict) -> tuple[str, str]:
+        config = self._item_dict(config)
         bucket = utils.trim(os.environ.get("R2_BUCKET", "") or config.get("bucket", ""))
         key = utils.trim(config.get("key", ""))
         if not key:
-            folder = utils.trim(config.get("folderid", ""))
-            filename = utils.trim(config.get("fileid", "")) or utils.trim(config.get("filename", ""))
+            folder = utils.trim(config.get("folder_id", "") or config.get("folderid", ""))
+            filename = utils.trim(config.get("file_id", "") or config.get("fileid", "")) or utils.trim(config.get("filename", ""))
             if filename:
                 key = f"{folder}/{filename}".removeprefix("/") if folder else filename
         return bucket, key
@@ -614,7 +603,8 @@ class PushToR2(PushTo):
         content_type, _ = mimetypes.guess_type(key)
         return content_type or default
 
-    def validate(self, config: dict) -> bool:
+    def validate(self, item=None, *, config=None) -> bool:
+        config = self._item_dict(item if item is not None else config)
         if not isinstance(config, dict):
             return False
 
@@ -627,7 +617,8 @@ class PushToR2(PushTo):
 
         return bool(self.endpoint)
 
-    def push_to(self, content: str, config: dict, group: str = "", retry: int = 5, **kwargs) -> bool:
+    def push_to(self, content: str, item=None, group: str = "", retry: int = 5, **kwargs) -> bool:
+        config = self._item_dict(item if item is not None else kwargs.get("config"))
         if not self.validate(config=config):
             logger.error(f"[PushError] push config is invalidate, domain: {self.name}")
             return False
@@ -690,14 +681,15 @@ class PushToR2(PushTo):
 
         records = {}
         for k, v in config.items():
-            if not isinstance(v, dict):
+            if not isinstance(v, (dict, StorageItem)):
                 continue
             bucket, key = self._bucket_key(v)
             if bucket and key:
                 records[k] = v
         return records
 
-    def raw_url(self, config: dict) -> str:
+    def raw_url(self, item=None, *, config=None) -> str:
+        config = self._item_dict(item if item is not None else config)
         if not isinstance(config, dict):
             return ""
 
@@ -718,79 +710,29 @@ class PushToR2(PushTo):
 SUPPORTED_ENGINES = set(["gist", "imperial", "pastefy", "pastegg", "qbin", "r2"] + [LOCAL_STORAGE])
 
 
-@dataclass
-class PushConfig(object):
-    # storage type
-    engine: str = ""
+def get_instance(storage: StorageConfig) -> PushTo:
+    if not isinstance(storage, StorageConfig):
+        raise ValueError("[PushError] invalid storage config")
 
-    # storage token
-    token: str = ""
-
-    # storage base address
-    base: str = ""
-
-    # storage domain address
-    domain: str = ""
-
-    # r2 access key id
-    access_key_id: str = ""
-
-    # r2 secret access key
-    secret_access_key: str = ""
-
-    # r2 account id
-    account_id: str = ""
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "PushConfig":
-        if not isinstance(data, dict) or not data:
-            return None
-
-        engine = utils.trim(data.get("engine", ""))
-        if engine not in SUPPORTED_ENGINES:
-            return None
-
-        token = utils.trim(data.get("token", ""))
-        base = utils.trim(data.get("base", ""))
-        domain = utils.trim(data.get("domain", "")) or utils.trim(data.get("public_base", ""))
-        access_key_id = utils.trim(data.get("access_key_id", "")) or utils.trim(data.get("access_key", ""))
-        secret_access_key = utils.trim(data.get("secret_access_key", "")) or utils.trim(data.get("secret_key", ""))
-        account_id = utils.trim(data.get("account_id", ""))
-
-        return cls(
-            engine=engine,
-            token=token,
-            base=base,
-            domain=domain,
-            access_key_id=access_key_id,
-            secret_access_key=secret_access_key,
-            account_id=account_id,
-        )
-
-
-def get_instance(config: PushConfig) -> PushTo:
-    if not config or not isinstance(config, PushConfig):
-        raise ValueError("[PushError] invalid push config")
-
-    engine = utils.trim(config.engine)
-    if not engine:
+    engine = utils.trim(storage.engine)
+    if engine not in SUPPORTED_ENGINES:
         raise ValueError(f"[PushError] unknown storge type: {engine}")
 
     if engine == "r2":
         access_key_id = utils.trim(
-            config.access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "") or os.environ.get("AWS_ACCESS_KEY_ID", "")
+            storage.access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "") or os.environ.get("AWS_ACCESS_KEY_ID", "")
         )
         secret_access_key = utils.trim(
-            config.secret_access_key
+            storage.secret_access_key
             or os.environ.get("R2_SECRET_ACCESS_KEY", "")
             or os.environ.get("AWS_SECRET_ACCESS_KEY", "")
         )
-        account_id = utils.trim(config.account_id or os.environ.get("R2_ACCOUNT_ID", ""))
-        endpoint = utils.trim(config.base or os.environ.get("R2_ENDPOINT", ""))
+        account_id = utils.trim(storage.account_id or os.environ.get("R2_ACCOUNT_ID", ""))
+        endpoint = utils.trim(storage.base or os.environ.get("R2_ENDPOINT", ""))
         if not endpoint and account_id:
             endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
 
-        public_base = utils.trim(config.domain or os.environ.get("R2_PUBLIC_BASE", ""))
+        public_base = utils.trim(storage.domain or os.environ.get("R2_PUBLIC_BASE", ""))
         return PushToR2(
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
@@ -799,14 +741,15 @@ def get_instance(config: PushConfig) -> PushTo:
             account_id=account_id,
         )
 
-    token = utils.trim(config.token or os.environ.get("PUSH_TOKEN", ""))
+
+    token = utils.trim(storage.token or os.environ.get("PUSH_TOKEN", ""))
     if engine != LOCAL_STORAGE and not token:
-        raise ValueError(f"[PushError] not found 'PUSH_TOKEN' in environment variables, please check it and try again")
+        raise ValueError("[PushError] not found 'PUSH_TOKEN' in environment variables, please check it and try again")
 
     if engine == "gist":
         return PushToGist(token=token)
 
-    base, domain = utils.trim(config.base), utils.trim(config.domain)
+    base, domain = utils.trim(storage.base), utils.trim(storage.domain)
     if engine == "imperial":
         return PushToImperial(token=token, base=base, domain=domain)
     elif engine == "pastefy":

@@ -15,18 +15,23 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
 
-import push
 import utils
 import workflow
 import yaml
 from airport import AirPort
-from crawl import naming_task
+from config.models import StorageItem
+from crawl.helpers import naming_task
+from crawl.models import ChannelResult
 from executable import which_bin
 from logger import logger
 from origin import Origin
+from push import PushTo
 
 import subconverter
 from clash import QuotedStr, quoted_scalar
+
+from .base import PluginContext, ScriptPlugin, register_plugin
+from .commons import as_channel_result, plugin_params
 
 # outbind type
 SUPPORT_TYPE = [
@@ -49,9 +54,6 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # last modified key name
 LAST_MODIFIED = "lastModified"
-
-# whether enable special protocols
-SPECIAL_PROTOCOLS = AirPort.enable_special_protocols()
 
 
 def current_time(utc: bool = True) -> datetime:
@@ -76,7 +78,7 @@ def get_dates(last: datetime) -> list[str]:
     return dates
 
 
-def detect(proxies: list, nopublic: bool, exclude: str, ignore: str, repeat: int) -> bool:
+def detect(proxies: list[dict[str, object]], nopublic: bool, exclude: str, ignore: str, repeat: int) -> bool:
     exclude = utils.trim(text=exclude)
     ignore = utils.trim(text=ignore)
     repeat = max(1, repeat)
@@ -86,7 +88,7 @@ def detect(proxies: list, nopublic: bool, exclude: str, ignore: str, repeat: int
 
     count = 0
     for p in proxies:
-        if not p or not isinstance(p, dict):
+        if not p or type(p) != dict:
             continue
 
         name = str(p.get("name", ""))
@@ -96,7 +98,7 @@ def detect(proxies: list, nopublic: bool, exclude: str, ignore: str, repeat: int
 
             if re.search(exclude, name, flags=re.I):
                 count += 1
-        except Exception:
+        except:
             logger.error(
                 f"[V2RaySE] invalid regex, ignore: {ignore}, exclude: {exclude}, message: \n{traceback.format_exc()}"
             )
@@ -163,11 +165,11 @@ def list_files(base: str, date: str, maxsize: int, last: datetime) -> list[str]:
                         modified = datetime.fromisoformat(updated_at[:-1]).replace(tzinfo=timezone.utc)
                         if modified < last:
                             continue
-                except Exception:
+                except:
                     logger.error(f"[V2RaySE] parse details of the file {name} error")
 
                 files.append(f"{base}/{name}")
-        except Exception:
+        except:
             logger.error(f"[V2RaySE] list files error, date: {date}, marker: {marker}")
 
     return files
@@ -200,7 +202,7 @@ def fetchone(
             )
             if parts:
                 subscriptions.extend([utils.trim(p) for p in parts])
-        except Exception:
+        except:
             pass
 
     if not noproxies:
@@ -215,7 +217,7 @@ def fetchone(
                 text=content,
                 program=subconverter,
                 artifact=name,
-                special=SPECIAL_PROTOCOLS,
+                special=AirPort.enable_special_protocols(),
                 throw=True,
             )
 
@@ -235,16 +237,16 @@ def fetchone(
                         if outbound.get("type", "") == "tuic":
                             logger.info(f"[V2RaySE] found tuic outbound in url: {url}")
                             break
-                except Exception:
+                except:
                     pass
-        except Exception:
-            logger.exception(f"[V2RaySE] parse proxies failed, url: {url}")
+        except:
+            logger.error(f"[V2RaySE] parse proxies failed, url: {url}, message: \n{traceback.format_exc()}")
 
     return proxies, list(set(subscriptions)) if subscriptions else []
 
 
-def fetch(params: dict) -> list:
-    if not params or not isinstance(params, dict):
+def fetch(params: dict[str, object], ctx: PluginContext | None = None) -> list[dict[str, object]]:
+    if not params or type(params) != dict:
         return []
 
     domain = utils.extract_domain(params.get("url", ""), include_protocal=True)
@@ -252,12 +254,18 @@ def fetch(params: dict) -> list:
         logger.error(f"[V2RaySE] skip collect data due to parameter 'url' missing")
         return []
 
-    storage = params.get("storage", {})
-    pushtool = push.get_instance(config=push.PushConfig.from_dict(storage))
-
-    persist = storage.get("items", {})
-    if not persist or not isinstance(persist, dict) or not pushtool.validate(config=persist.get("proxies", {})):
-        logger.error(f"[V2RaySE] invalid persist config, please check it and try again")
+    if ctx is not None and not isinstance(ctx, PluginContext):
+        return []
+    pushtool = ctx.pushtool if ctx else None
+    persist = ctx.persist if ctx and isinstance(ctx.persist, dict) else {}
+    proxies_store = persist.get("proxies")
+    modified_store = persist.get("modified")
+    if (
+        not isinstance(pushtool, PushTo)
+        or not isinstance(proxies_store, StorageItem)
+        or not pushtool.validate(item=proxies_store)
+    ):
+        logger.error("[V2RaySE] invalid persist config, please check it and try again")
         return []
 
     nopublic = params.get("nopublic", True)
@@ -271,15 +279,11 @@ def fetch(params: dict) -> list:
     mixed = utils.trim(params.get("format", "clash")).lower() != "clash"
     display = params.get("display", False)
 
-    # storage config
-    proxies_store = persist.get("proxies", {})
-    modified_store = persist.get("modified", {})
-
-    history_url = pushtool.raw_url(config=modified_store)
+    history_url = pushtool.raw_url(item=modified_store) if modified_store else ""
     last = last_history(url=history_url, interval=interval)
 
     dates, manual = params.get("dates", []), True
-    if not isinstance(dates, list) or not dates:
+    if not dates or type(dates) != list:
         dates, manual = get_dates(last=last), False
 
     begin = current_time(utc=True).strftime(DATE_FORMAT)
@@ -367,20 +371,33 @@ def fetch(params: dict) -> list:
     filename = os.path.join(os.path.dirname(datapath), "data", "v2rayse.txt")
     utils.write_file(filename=filename, lines=content)
 
-    success = pushtool.push_to(content=content or " ", config=proxies_store, group="v2rayse")
+    success = pushtool.push_to(content=content or " ", item=proxies_store, group="v2rayse")
     if not success:
         return tasks
 
     # save last modified time
-    if not manual and pushtool.validate(config=modified_store):
+    if not manual and pushtool.validate(item=modified_store):
         content = json.dumps({LAST_MODIFIED: begin})
-        pushtool.push_to(content=content, config=modified_store, group="modified")
+        pushtool.push_to(content=content, item=modified_store, group="modified")
 
     config = params.get("config", {})
-    config["sub"] = pushtool.raw_url(config=proxies_store)
+    config["sub"] = pushtool.raw_url(item=proxies_store)
     config["saved"] = True
     config["name"] = "v2rayse" if not config.get("name", "") else config.get("name")
     config["push_to"] = list(set(config.get("push_to", [])))
 
     tasks.append(config)
     return tasks
+
+
+class V2RaySEPlugin(ScriptPlugin[dict[str, object]]):
+    name = "v2rayse"
+
+    def parse(self, ctx: PluginContext) -> dict[str, object]:
+        return plugin_params(ctx)
+
+    def run(self, config: dict[str, object], ctx: PluginContext) -> ChannelResult:
+        return as_channel_result(fetch(config, ctx))
+
+
+register_plugin(V2RaySEPlugin())

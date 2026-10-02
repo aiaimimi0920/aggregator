@@ -12,11 +12,15 @@ import time
 import urllib
 import urllib.request
 
-import push
 import utils
+from config.models import StorageItem
+from crawl.models import ChannelResult
 from logger import logger
+from push import PushTo
 
 from . import commons
+from .base import PluginContext, ScriptPlugin, register_plugin
+from .commons import as_channel_result, plugin_params
 
 
 def fetch(email: str, retry: int = 2) -> str:
@@ -36,17 +40,14 @@ def fetch(email: str, retry: int = 2) -> str:
         "user-agent": utils.USER_AGENT,
     }
 
-    for attempt in range(max(1, retry)):
-        try:
-            request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
-            response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
-            if response.getcode() != 200:
-                continue
-
+    try:
+        request = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
+        response = urllib.request.urlopen(request, timeout=10, context=utils.CTX)
+        if response.getcode() == 200:
             content = response.read()
             try:
                 content = gzip.decompress(content).decode("utf8")
-            except Exception:
+            except:
                 content = str(content, encoding="utf8")
 
             fake_email, index = email, email.find("@")
@@ -64,44 +65,38 @@ def fetch(email: str, retry: int = 2) -> str:
 
             subscribe = str(base64.b64decode(groups[0]), encoding="UTF8")
             return subscribe
-        except Exception:
-            if attempt >= max(1, retry) - 1:
-                break
-            time.sleep(random.random())
 
-    return ""
+    except:
+        time.sleep(random.random())
+        return fetch(email, retry - 1)
 
 
-def getrss(params: dict) -> list:
-    if not params or not isinstance(params, dict):
+def getrss(params: dict[str, object], ctx: PluginContext | None = None) -> list[dict[str, object]]:
+    if not params or type(params) != dict:
         return []
 
     emails = params.get("emails", [])
-    if isinstance(emails, list) and emails:
+    if emails and type(emails) == list:
         emails = [x for x in emails if re.match(r"^\w+([-+.]\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$", x)]
 
     config = params.get("config", {})
-    if not emails or not isinstance(config, dict) or not config or not config.get("push_to"):
+    if not emails or not config or type(config) != dict or not config.get("push_to"):
         logger.error(f"[V2RayFreeError] cannot fetch subscribes bcause missing some parameters")
         return []
 
-    include = params.get("include", "").strip()
-    storage = params.get("storage", {})
-    if not storage or not isinstance(storage, dict):
-        logger.error(f"[V2RayFreeError] cannot fetch subscribes bcause storage config is invalidate")
+    include = str(params.get("include", "") or "").strip()
+    if ctx is not None and not isinstance(ctx, PluginContext):
         return []
-
-    persist = storage.get("items", {})
-    push_config = push.PushConfig.from_dict(storage)
-
-    exists = load(config=push_config, persist=persist)
+    pushtool = ctx.pushtool if ctx else None
+    persist = ctx.persist if ctx else None
+    exists = load(pushtool=pushtool, persist=persist)
     emails = [x for x in emails if x not in exists.keys()]
 
     results, subscribes = utils.multi_thread_run(func=fetch, tasks=emails), []
     exists.update(filter(data=dict(zip(emails, results))))
 
     # persist subscribes
-    commons.persist(config=push_config, data=exists, persist=persist)
+    commons.persist(pushtool=pushtool, data=exists, item=persist)
 
     results = list(exists.values())
     results.extend(config.get("sub", []))
@@ -128,22 +123,21 @@ def getrss(params: dict) -> list:
     return [config]
 
 
-def load(config: push.PushConfig, persist: dict) -> dict:
-    pushtool = push.get_instance(config=config)
-    if not pushtool.validate(config=persist):
+def load(pushtool: PushTo | None, persist: StorageItem | None) -> dict[str, object]:
+    if not isinstance(pushtool, PushTo) or not isinstance(persist, StorageItem) or not pushtool.validate(item=persist):
         return {}
 
-    url = pushtool.raw_url(config=persist)
+    url = pushtool.raw_url(item=persist)
     try:
         content = utils.http_get(url=url)
         data = json.loads(content)
         return filter(data=data)
-    except Exception:
+    except:
         return {}
 
 
-def filter(data: dict) -> dict:
-    if not data or not isinstance(data, dict):
+def filter(data: dict[str, object]) -> dict[str, object]:
+    if not data or type(data) != dict:
         return {}
 
     emails, subscribes = list(data.keys()), list(data.values())
@@ -168,3 +162,16 @@ def check(subscribe: str) -> bool:
         )
         is not None
     )
+
+
+class V2RayFreePlugin(ScriptPlugin[dict[str, object]]):
+    name = "v2rayfree"
+
+    def parse(self, ctx: PluginContext) -> dict[str, object]:
+        return plugin_params(ctx)
+
+    def run(self, config: dict[str, object], ctx: PluginContext) -> ChannelResult:
+        return as_channel_result(getrss(config, ctx))
+
+
+register_plugin(V2RayFreePlugin())

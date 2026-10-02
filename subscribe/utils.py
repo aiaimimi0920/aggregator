@@ -673,3 +673,25 @@ def multi_thread_run(
     )
 
     return results
+
+
+_SUSPICIOUS_URL_RE = re.compile(
+    r"(?i)("
+    r"(?:^|//)(?:[^/]*\.)?(?:speedtest|librespeed|fast\.com|cachefly\.net|thinkbroadband\.com|speed\.cloudflare\.com)"
+    r"|/__down(?:\?|$)"
+    r"|\.(?:zip|iso|exe|mp4|mkv|avi|tar|tgz|gz|7z|rar|bin|img|dmg|apk|msi|pdf|"
+    r"css|js|png|jpe?g|gif|svg|webp|woff2?|ico|map|torrent)(?:\?|$)"
+    r")"
+)
+
+def is_suspicious_url(url: str) -> bool:
+    if not url or not isinstance(url, str):
+        return False
+    return bool(_SUSPICIOUS_URL_RE.search(url.strip()))
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = trim(os.environ.get(name, ""))
+    if not raw:
+        return default
+    return raw.lower() in ["true", "1"]

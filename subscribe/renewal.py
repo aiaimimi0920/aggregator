@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import utils
+from config.models import RenewJob
 from logger import logger
 
 warnings.filterwarnings("ignore")
@@ -678,18 +679,18 @@ def flow(
     return success
 
 
-def add_traffic_flow(domain: str, params: dict, jsonify: bool = False) -> str:
-    if not domain or not params:
-        logger.error(f"[RenewalError] invalidate arguments")
+def add_traffic_flow(domain: str, job: RenewJob, jsonify: bool = False) -> str:
+    if not domain or not isinstance(job, RenewJob) or not job.account:
+        logger.error("[RenewalError] invalidate arguments")
         return ""
     try:
-        email = base64.b64decode(params.get("email", "")).decode()
-        password = base64.b64decode(params.get("passwd", "")).decode()
+        email = base64.b64decode(job.account.email).decode() if job.account.email else ""
+        password = base64.b64decode(job.account.password).decode() if job.account.password else ""
         if utils.isblank(email) or utils.isblank(password):
             logger.info(f"[RenewalError] email or password cannot be empty, domain: {domain}")
             return ""
 
-        api_prefix = params.get("api_prefix", "")
+        api_prefix = job.api_prefix
         cookies, authorization = get_cookies(
             domain=domain,
             username=email,
@@ -707,10 +708,10 @@ def add_traffic_flow(domain: str, params: dict, jsonify: bool = False) -> str:
             logger.info(f"[RenewalError] cannot fetch subscribe information")
             return ""
 
-        plan_id = params.get("plan_id", subscribe.plan_id)
-        package = params.get("package", subscribe.package)
-        coupon_code = params.get("coupon_code", "")
-        method = params.get("method", -1)
+        plan_id = job.plan_id if job.plan_id is not None else subscribe.plan_id
+        package = job.package or subscribe.package
+        coupon_code = job.coupon_code
+        method = job.method if job.method is not None else -1
         if method <= 0:
             methods = get_payment_method(
                 domain=domain,
@@ -734,7 +735,7 @@ def add_traffic_flow(domain: str, params: dict, jsonify: bool = False) -> str:
             "jsonify": jsonify,
         }
 
-        renew = params.get("enable", True)
+        renew = job.enable
         if renew and subscribe.reset_enable and subscribe.used_rate >= 0.8:
             success = flow(
                 domain=domain,
@@ -770,21 +771,17 @@ def add_traffic_flow(domain: str, params: dict, jsonify: bool = False) -> str:
                 f"skip renew traffic plan, domain: {domain}\trenew: {renew}\tenable: {subscribe.renew_enable}\texpired-days: {subscribe.expired_days}"
             )
 
-        # 提交工单重置流量
-        ticket = params.get("ticket", {})
-        if isinstance(ticket, dict) and ticket:
-            ticket = dict(ticket)
-            enable = ticket.pop("enable", True)
-            autoreset = ticket.pop("autoreset", False)
+        ticket = job.account.ticket
+        if ticket:
             # 过期时间 <= 5 或者 流量使用例 >= 0.8 或者 重置日期 <= 1 且不会自动重置时提交工单
-            if enable and (
+            if ticket.enable and (
                 (subscribe.expired_days <= 5 or subscribe.used_rate >= 0.8)
-                or (not autoreset and subscribe.reset_day <= 1)
+                or (not ticket.auto_reset and subscribe.reset_day <= 1)
             ):
                 success = submit_ticket(
                     domain=domain,
                     cookies=cookies,
-                    ticket=ticket,
+                    ticket=ticket.to_dict(),
                     authorization=authorization,
                     api_prefix=api_prefix,
                     jsonify=jsonify,
@@ -793,6 +790,6 @@ def add_traffic_flow(domain: str, params: dict, jsonify: bool = False) -> str:
                 logger.info(f"ticket submit {'successed' if success else 'failed'}, domain: {domain}")
 
         return subscribe.sub_url
-    except Exception:
-        logger.exception(f"[RenewalError] add traffic flow failed, domain: {domain}")
+    except:
+        traceback.print_exc()
         return ""

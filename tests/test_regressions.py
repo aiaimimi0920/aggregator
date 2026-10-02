@@ -13,7 +13,9 @@ if str(SUBSCRIBE_DIR) not in sys.path:
     sys.path.insert(0, str(SUBSCRIBE_DIR))
 
 import airport  # noqa: E402
-import crawl  # noqa: E402
+from crawl.extract import extract_subscribes  # noqa: E402
+from crawl.channels.telegram import get_telegram_pages  # noqa: E402
+from config.models import NodeInput, RenewAccount, RenewJob, TicketConfig  # noqa: E402
 import mailtm  # noqa: E402
 import renewal  # noqa: E402
 import workflow  # noqa: E402
@@ -117,7 +119,9 @@ class RenewalRegressionTests(unittest.TestCase):
             "ticket": ticket,
         }
 
-        sub_url = renewal.add_traffic_flow("https://example.com", params)
+        typed_ticket = TicketConfig(enable=True, auto_reset=False, subject=ticket["subject"], message=ticket["message"], level=1)
+        job = RenewJob(account=RenewAccount(email=params["email"], password=params["passwd"], ticket=typed_ticket))
+        sub_url = renewal.add_traffic_flow("https://example.com", job)
 
         self.assertEqual(
             sub_url,
@@ -126,6 +130,8 @@ class RenewalRegressionTests(unittest.TestCase):
         self.assertIn("enable", ticket)
         self.assertIn("autoreset", ticket)
         self.assertEqual(ticket["subject"], "Need reset")
+        self.assertTrue(typed_ticket.enable)
+        self.assertFalse(typed_ticket.auto_reset)
         self.assertEqual(mock_flow.call_count, 2)
         mock_submit_ticket.assert_called_once()
         mock_get_payment_method.assert_called_once()
@@ -149,29 +155,29 @@ class CrawlRegressionTests(unittest.TestCase):
     def test_extract_subscribes_managed_config_link_is_detected(self):
         content = '#!MANAGED-CONFIG https://example.com/api/v1/client/subscribe?token=ABCDEFGHIJKLMNOP'
 
-        results = crawl.extract_subscribes(content=content, source="TEST")
+        results = {item.url: item for item in extract_subscribes(content=content, source="TEST").items}
 
         self.assertIn(
             "https://example.com/api/v1/client/subscribe?token=ABCDEFGHIJKLMNOP",
             results,
         )
         self.assertEqual(
-            results["https://example.com/api/v1/client/subscribe?token=ABCDEFGHIJKLMNOP"]["origin"],
+            results["https://example.com/api/v1/client/subscribe?token=ABCDEFGHIJKLMNOP"].origin,
             "TEST",
         )
 
     def test_extract_subscribes_does_not_reuse_default_push_list_between_calls(self):
         content = "https://example.com/api/v1/client/subscribe?token=ABCDEFGHIJKLMNOP"
 
-        first = crawl.extract_subscribes(content=content)
-        first[content]["push_to"].append("mutated")
-        second = crawl.extract_subscribes(content=content)
+        first = extract_subscribes(content=content)
+        first.items[0].task.push_to.append("mutated")
+        second = extract_subscribes(content=content)
 
-        self.assertEqual(second[content]["push_to"], [])
+        self.assertEqual(second.items[0].task.push_to, [])
 
-    @patch("crawl.utils.http_get", return_value='<link rel="canonical" href="/s/demo?before=12345">')
+    @patch("crawl.channels.telegram.utils.http_get", return_value='<link rel="canonical" href="/s/demo?before=12345">')
     def test_get_telegram_pages_parses_before_marker(self, mock_http_get):
-        before = crawl.get_telegram_pages("demo")
+        before = get_telegram_pages("demo")
 
         self.assertEqual(before, 12345)
         mock_http_get.assert_called_once()
@@ -226,7 +232,7 @@ class AirportRegressionTests(unittest.TestCase):
             headers={"Set-Cookie": "v2board_session=session123; Path=/;"},
         )
 
-        client = airport.AirPort(name="demo", site="https://example.com", sub="")
+        client = airport.AirPort(name="demo", site="https://example.com", nodes=NodeInput())
         cookies, authorization = client.register(
             email="user@example.com",
             password="secret123",
@@ -236,7 +242,7 @@ class AirportRegressionTests(unittest.TestCase):
         self.assertEqual(cookies, "v2board_session=session123;")
         self.assertEqual(authorization, "")
         self.assertEqual(
-            client.sub,
+            client.nodes.subscribe,
             "https://example.com/api/v1/client/subscribe?token=abc123token",
         )
         mock_order_plan.assert_called_once()
@@ -254,7 +260,7 @@ class AirportRegressionTests(unittest.TestCase):
         ).encode("utf8")
         mock_urlopen.return_value = DummyResponse(code=200, body=body)
 
-        client = airport.AirPort(name="demo", site="https://example.com", sub="")
+        client = airport.AirPort(name="demo", site="https://example.com", nodes=NodeInput())
         client.fetch = "https://example.com/api/v1/user/server/fetch"
 
         result = client.fetch_unused("session=1", rate=3.0)
